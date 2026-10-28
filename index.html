@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lichterglanz – Glow of Lights · eine Weihnachtsdemo in Drachenhauch</title>
+  <meta name="description" content="Lichterglanz: eine Weihnachtsdemo, Musik und Bilder ganz in einem Programm erzeugt. Von Hans Schnorrenberger, geschrieben in Drachenhauch. -- Glow of Lights: a Christmas demo, music and pictures all made by one program. By Hans Schnorrenberger, written in Drachenhauch." />
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+                 font-family: Georgia, "Times New Roman", serif; color: #f0e2c8; }
+    /* raylib schreibt die Groesse als Inline-Stil an die Leinwand; der Puffer
+       bleibt 1280x720, angezeigt wird er eingepasst und mittig. */
+    canvas#canvas { position: absolute; inset: 0; margin: auto;
+                    width: min(100vw, calc(100vh * 16 / 9)) !important;
+                    height: min(100vh, calc(100vw * 9 / 16)) !important;
+                    background: #000; display: block; outline: none; }
+    #start { position: absolute; inset: 0; display: flex; flex-direction: column;
+             align-items: center; justify-content: center; cursor: pointer;
+             background: radial-gradient(ellipse at 50% 55%, #3a1a10 0%, #140806 45%, #050302 80%);
+             text-align: center; z-index: 2; }
+    #start h1 { font-weight: normal; letter-spacing: 0.5em; font-size: clamp(28px, 6vw, 64px);
+                margin: 0 0 0 0.5em; color: #ffe9bf;
+                text-shadow: 0 0 18px rgba(255, 190, 90, 0.55), 0 0 42px rgba(255, 140, 40, 0.3); }
+    #start p { margin: 10px 0; color: #d6b98e; font-size: clamp(13px, 1.8vw, 18px); }
+    #start .knopf { margin-top: 28px; padding: 12px 28px; border: 1px solid #c8913c;
+                    border-radius: 999px; color: #ffe9bf; font-size: 18px;
+                    letter-spacing: 0.15em; background: rgba(120, 30, 20, 0.35);
+                    box-shadow: 0 0 22px rgba(255, 170, 70, 0.25); }
+    #start .klein { font-size: 13px; color: #9a7f5c; margin-top: 22px; }
+    #start.laedt { cursor: progress; }
+    /* die englische Zeile unter der deutschen, kleiner und zurueckhaltender */
+    #start .en { margin-top: -6px; font-size: 0.82em; color: #a68a64; font-style: italic; }
+    #start .knopf .en { display: block; margin-top: 4px; font-size: 13px; color: #e0c08e; letter-spacing: 0.1em; }
+    /* vier Kerzen ueber dem Titel, wie auf dem Kranz */
+    #kerzen { display: flex; gap: clamp(18px, 4vw, 40px); margin-bottom: 26px; }
+    #kerzen span { width: 10px; height: 34px; background: linear-gradient(#d23a2a, #8e1a12);
+                   border-radius: 3px; position: relative; }
+    #kerzen span::before { content: ""; position: absolute; left: 50%; top: -17px;
+                   width: 8px; height: 14px; margin-left: -4px; border-radius: 50% 50% 45% 45%;
+                   background: radial-gradient(ellipse at 50% 70%, #fff8d8 0%, #ffcf5a 45%, rgba(255,140,30,0) 75%);
+                   box-shadow: 0 0 16px 6px rgba(255, 180, 70, 0.45);
+                   animation: flackern 1.7s ease-in-out infinite alternate; }
+    #kerzen span:nth-child(2)::before { animation-delay: -0.5s; }
+    #kerzen span:nth-child(3)::before { animation-delay: -1.1s; }
+    #kerzen span:nth-child(4)::before { animation-delay: -0.8s; }
+    @keyframes flackern { from { transform: scale(1, 1); opacity: 0.95; }
+                          to { transform: scale(0.9, 1.12) translateY(-1px); opacity: 1; } }
+    #leiste { position: absolute; right: 12px; bottom: 10px; z-index: 3;
+              display: flex; gap: 8px; opacity: 0.35; transition: opacity 0.3s; }
+    #leiste:hover { opacity: 1; }
+    #leiste button, #leiste a { background: rgba(26,12,8,0.8); color: #f0e2c8;
+              border: 1px solid #70482a; border-radius: 6px; padding: 5px 10px;
+              font: 13px system-ui, sans-serif; cursor: pointer; text-decoration: none; }
+    #meldung { position: absolute; left: 12px; bottom: 10px; z-index: 3;
+               font: 13px system-ui, sans-serif; color: #e0a0a0; white-space: pre-wrap;
+               max-width: 70vw; }
+    a { color: #f0c27a; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="1280" height="720" tabindex="-1"
+          oncontextmenu="event.preventDefault()"></canvas>
+
+  <div id="start">
+    <div id="kerzen"><span></span><span></span><span></span><span></span></div>
+    <h1>LICHTERGLANZ</h1>
+    <p>Eine Weihnachtsdemo: vom Adventskranz bis zum Stern über der Stube – Musik und Bild aus einem Programm</p>
+    <p class="en">A Christmas demo: from the Advent wreath to the star above the tree – music and pictures from one program</p>
+    <p>von Hans Schnorrenberger · geschrieben in <a href="https://github.com/HasoSchno70/Drachenhauch" onclick="event.stopPropagation()">Drachenhauch</a></p>
+    <p class="en">by Hans Schnorrenberger · written in Drachenhauch</p>
+    <div class="knopf" id="knopf"><span id="knopfText">▶&nbsp;&nbsp;Starten (mit Ton)</span><span class="en" id="knopfEn">Start (with sound)</span></div>
+    <p class="klein">knapp vier Minuten · Kopfhörer empfohlen · lädt etwa 20 MB</p>
+    <p class="klein en">a little under four minutes · headphones recommended · loads about 20 MB</p>
+  </div>
+
+  <div id="leiste">
+    <button id="vollbild" title="Vollbild · Full screen (F11)">⛶ Vollbild · Full screen</button>
+    <button id="nochmal" title="Neu laden und noch einmal · Reload and play again">↻ Nochmal · Again</button>
+    <a href="https://github.com/HasoSchno70/Drachenhauch" target="_blank" rel="noopener">Drachenhauch</a>
+    <a href="THIRD-PARTY-NOTICES.txt" target="_blank" rel="noopener">Lizenzen · Licences</a>
+  </div>
+  <div id="meldung"></div>
+
+  <script>
+  (function () {
+    var start = document.getElementById("start");
+    var knopf = document.getElementById("knopf");
+    var meldung = document.getElementById("meldung");
+    var bereit = false, gewuenscht = false, quelle = null;
+
+    function zeige(t) { meldung.textContent += t + "\n"; }
+    // Warnungen von raylib (Monitor-Abfragen gibt es im Browser nicht) nicht zeigen
+    function ausgabe(t) { if (!/^WARNING:|^INFO:/.test(t)) zeige(t); }
+
+    window.Module = {
+      canvas: document.getElementById("canvas"),
+      noInitialRun: true,
+      print: ausgabe,
+      printErr: ausgabe,
+      onRuntimeInitialized: function () { bereit = true; vielleichtStarten(); }
+    };
+
+    fetch("program.dh", { cache: "no-cache" }).then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.text();
+    }).then(function (t) { quelle = t; vielleichtStarten(); })
+      .catch(function (e) { zeige("program.dh fehlt: " + e.message); });
+
+    function vielleichtStarten() {
+      if (!gewuenscht || !bereit || quelle === null) return;
+      start.style.display = "none";
+      // Im Browser macht die Seite das Vollbild (Knopf unten rechts, F11 des
+      // Browsers). SET_FULLSCREEN der Demo fragt nach der Groesse des
+      // Bildschirms, die raylib im Browser nicht kennt, und verstellt dabei
+      // den Zeichenpuffer -- je nach Bildschirm sah man nur einen Teil.
+      quelle = quelle
+        .replace("IF NOT imFenster THEN SET_FULLSCREEN(TRUE)", "' Vollbild: die Seite")
+        .replace(/IF KEYHIT\(KEY_F11\) THEN SET_FULLSCREEN\([^\n]*/, "' F11: der Browser");
+      // Wenig Speicher (Handys): die Klaenge erst kurz vor ihrem Einsatz bauen
+      // und danach wieder freigeben -- alle vorab brauchen mehr Speicher, als
+      // ein Handy einer Seite gibt. navigator.deviceMemory kennen nur Chrome
+      // und Edge; ohne es entscheidet die Art des Geraets. ?sparsam erzwingt es.
+      var gb = navigator.deviceMemory;
+      var wenig = /[?&]sparsam/.test(location.search) ||
+        (gb !== undefined ? gb < 8 : /iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent));
+      if (wenig) quelle = quelle.replace("DIM sparsam AS BOOLEAN", "DIM sparsam AS BOOLEAN : sparsam = TRUE");
+      try {
+        Module.FS.writeFile("/program.dh", quelle);
+        Module.callMain([]);
+      } catch (e) {
+        if (!(e && e.name === "ExitStatus")) zeige("" + e);
+      }
+      document.getElementById("canvas").focus();
+    }
+
+    start.addEventListener("click", function () {
+      if (gewuenscht) return;
+      gewuenscht = true;
+      start.classList.add("laedt");
+      document.getElementById("knopfText").textContent = bereit ? "startet …" : "lädt …";
+      document.getElementById("knopfEn").textContent = bereit ? "starting …" : "loading …";
+      vielleichtStarten();
+    });
+
+    document.getElementById("vollbild").addEventListener("click", function () {
+      var el = document.documentElement;
+      if (document.fullscreenElement) document.exitFullscreen();
+      else if (el.requestFullscreen) el.requestFullscreen();
+    });
+    document.getElementById("nochmal").addEventListener("click", function () {
+      location.reload();
+    });
+
+    var s = document.createElement("script");
+    s.src = "dhrt.js";
+    document.body.appendChild(s);
+  })();
+  </script>
+</body>
+</html>
