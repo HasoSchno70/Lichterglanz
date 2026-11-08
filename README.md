@@ -5,10 +5,11 @@
 A Christmas demo by Hans Schnorrenberger, written in
 [Drachenhauch](https://github.com/HasoSchno70/Drachenhauch): festive
 electronic music, a little under four minutes. A journey around the Advent
-wreath -- one chapter for each candle: a snowy village at night, the
-Christmas market with its carousel, a frozen lake in the winter forest where
-ice crystals grow with the melody, a sleigh flight past the moon. On
-Christmas Eve we look through the window into the living room: the tree
+wreath -- one chapter for each candle: a village that grows out of the snow
+house by house, the Christmas market with its carousel and people, a frozen
+lake in the winter forest with a cabin and skaters, where ice crystals grow
+with the melody, a sleigh flight through the clouds to the moon. On
+Christmas Eve the window opens into the living room: the tree unfolds and
 decorates itself bauble by bauble to "Silent Night", at midnight the bells
 strike twelve, and the star on top lights up. Music, sounds and pictures are
 all made by the program itself: there is not a single sound or image file
@@ -26,19 +27,20 @@ headphones, ⛶ for full screen. The first load is about 20 MB.
 | | |
 |---|---|
 | ![Advent wreath](bilder/01_kranz.jpg) | ![The village](bilder/02_dorf.jpg) |
-| **Advent wreath** -- fir, berries, four red candles; with each candle the camera flies into the flame | **First Advent: the village** -- half-timbered houses, warm windows with candle arches, lanterns, the church at the end of the lane |
+| **Advent wreath** -- fir, berries, four red candles; each one lights up on a bell stroke, and the camera flies into its flame | **First Advent: the village** -- above a valley in the forest the church grows out of the snow, then house after house; windows light up, smoke rises, lanterns and the village tree glow |
 | ![Christmas market](bilder/03_markt.jpg) | ![Winter forest](bilder/04_wald.jpg) |
-| **Second Advent: the Christmas market** -- stalls with fairy lights, steam from the mulled wine, a carousel turning on the audio clock | **Third Advent: the winter forest** -- a frozen lake, snowy firs, a deer in the moonlight, northern lights |
+| **Second Advent: the Christmas market** -- stalls full of candles, baubles and gingerbread hearts, strings of lights, people in bobble hats, a carousel turning on the audio clock | **Third Advent: the winter forest** -- a frozen lake, a cabin with warm windows, ice lanterns mirrored in the ice, skaters, a deer, an owl crossing the moon |
 | ![Frost flowers](bilder/05_eisblumen.jpg) | ![Sleigh flight](bilder/06_schlitten.jpg) |
-| **Frost flowers** -- six-armed crystals grow across the ice and light up with every note | **Fourth Advent: the flight to the moon** -- low over hills and villages, a sleigh with four reindeer, gold dust behind it |
+| **Frost flowers** -- six-armed crystals grow across the ice and light up with every note | **Fourth Advent: the flight to the moon** -- low over hills and villages, then up through the clouds; above a sea of clouds the sleigh, led by a red nose, draws a ribbon of gold dust to the moon |
 | ![Christmas Eve](bilder/07_stube.jpg) | ![The star](bilder/08_stern.jpg) |
-| **Christmas Eve** -- through the frosted window into the room: fireplace, presents, a tree that decorates itself to "Silent Night" | **Midnight** -- twelve bell strokes, each sends a ring of light from the tree, then the star rises |
+| **Christmas Eve** -- the window opens into the room: fireplace, clock, candle arch, presents; the tree unfolds, its lights come on, it decorates itself to "Silent Night" | **Midnight** -- the clock strikes twelve, each bell stroke sends a ring of light from the tree, then the star rises |
 
 ## How it is made
 
 * **Music:** synthesised note by note (`AUDIO_NOTE`) and played on an audio
   clock, 116 beats per minute: celesta, music box, tubular bells, sleigh
-  bells, strings, choir, piano and supersaw pads. The bell motif from
+  bells, strings, choir, piano, supersaw pads, brass and timpani (fanfares
+  for the chapters, the star rising with full brass). The bell motif from
   "Shchedryk" (Mykola Leontovych, 1916 -- known as "Carol of the Bells")
   runs through everything, and "Silent Night" (Franz Xaver Gruber, 1818)
   comes in 6/8 time; both are in the public domain.

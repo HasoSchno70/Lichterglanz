@@ -1,11 +1,13 @@
 #version 330
-// Das Dorf im Schnee: eine Gasse zwischen Fachwerkhaeusern bei Nacht. Auf den
-// Daechern liegt Schnee (wo eine Flaeche nach oben zeigt), die Fenster
-// leuchten warm, in manchen steht ein Schwibbogen, Laternen werfen Licht auf
-// den Schnee, am Ende der Gasse der Kirchturm, darueber Mond und Sterne. Die
-// Kamera geht langsam die Gasse hinauf (`fort`). Im Abspann (`ende`) hebt sie
-// den Blick zum Himmel, wo der Stern ueber dem Dorf steht (`sternPos`, in
-// Bildpunkten -- main.dh laesst von dort den Lichterschwarm aufsteigen).
+// Das Dorf im Schnee: ein Tal bei Nacht, ringsum verschneiter Tannenwald, in
+// der Mitte die Kirche. Das Dorf baut sich auf (`fort`): erst waechst die
+// Kirche aus dem Schnee, dann Haus um Haus -- von der Mitte nach aussen,
+// jedes auf einem Schlag. Steht ein Haus, gehen seine Fenster an und aus dem
+// Schornstein steigt Rauch; zuletzt zuenden sich die Laternen entlang der
+// Gasse an. Die Kamera kreist erst hoch ueber dem Tal und senkt sich dann in
+// die Gasse vor der Kirche. Im Abspann (`ende`) hebt sie den Blick zum Himmel,
+// wo der Stern ueber dem Dorf steht (`sternPos`, in Bildpunkten -- main.dh
+// laesst von dort den Lichterschwarm aufsteigen).
 in vec2 fragTexCoord;
 uniform sampler2D texture0;
 uniform vec2 resolution;
@@ -33,103 +35,291 @@ float rausch(vec2 p) {
     return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
 }
 
-const float ZELLE = 4.2;       // ein Haus je Zelle entlang der Gasse
-const float FASSADE = 2.6;     // Abstand der Hauswand von der Mitte
+const float PI = 3.14159265;
 const vec3 MOND = vec3(-0.4493, 0.4194, 0.7888);
+const float ZELLE = 8.0;        // ein Haus je Zelle
+const float DORF = 27.0;        // Radius des Dorfes, dahinter Wald
+const float WZELLE = 4.5;       // eine Tanne je Waldzelle
+const vec3 KIRCHE = vec3(0.0, 0.0, 4.5);
+const vec3 BAUM = vec3(2.9, 0.0, -8.5);   // der Dorfbaum vor der Kirche
 
 float sdBox(vec3 p, vec3 b) {
     vec3 q = abs(p) - b;
     return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
+float sdKegel(vec3 p, float r, float h) {
+    // Kegel mit Spitze im Ursprung, Grundflaeche bei y = -h, Radius r
+    vec2 q = vec2(r, -h);
+    vec2 w = vec2(length(p.xz), p.y);
+    vec2 a = w - q * clamp(dot(w, q) / dot(q, q), 0.0, 1.0);
+    vec2 b = w - q * vec2(clamp(w.x / q.x, 0.0, 1.0), 1.0);
+    float k = sign(q.y);
+    float d = min(dot(a, a), dot(b, b));
+    float s = max(k * (w.x * q.y - w.y * q.x), k * (w.y - q.y));
+    return sqrt(d) * sign(s);
+}
 
-// Hoehe der Wand des Hauses in Zelle id auf Seite s
-float wandHoehe(float id, float s) { return 2.6 + floor(hash(vec2(id, s)) * 3.0) * 0.45; }
+// Wie weit das Dorf steht: 0 = nur Schnee und Wald, 1 = alles gebaut
+float aufbau() { return clamp((fort - 0.05) / 0.58, 0.0, 1.0); }
 
-// Material: 0 Schnee am Boden, 1 Wand, 2 Dach, 3 Laternenpfahl
+// Der Boden: im Dorf eben, dahinter steigen sanfte Huegel an
+float gelaende(vec2 xz) {
+    float r = length(xz);
+    float h = smoothstep(DORF - 2.0, 75.0, r) * 10.0;
+    h += (rausch(xz * 0.045) - 0.5) * 4.0 * smoothstep(DORF, DORF + 15.0, r);
+    return h + 0.08 * rausch(xz * 0.6);
+}
+
+// --- Die Haeuser --------------------------------------------------------------
+// Je Zelle ein Haus mit eigenem Mass, eigener Richtung und eigenem Beginn.
+// Frei bleiben die Gasse (x-Zelle 0, suedlich) und der Platz der Kirche.
+struct Haus {
+    float da;       // 0 = kein Haus
+    vec2 ort;
+    float W;        // halbe Breite (entlang des Firsts)
+    float D;        // halbe Tiefe
+    float h;        // Wandhoehe
+    float rh;       // Dachhoehe
+    float dreh;     // 1 = First entlang z
+    float u;        // wie weit es steht (0 .. 1)
+    float vor;      // kurz davor: der Grundriss leuchtet auf (0 .. 1)
+    float seed;
+};
+Haus hausIn(vec2 id) {
+    Haus H;
+    vec2 mitte = (id + 0.5) * ZELLE - vec2(ZELLE * 0.5, ZELLE * 0.5);
+    H.seed = hash(id + 0.37) * 100.0;
+    float r = length(mitte);
+    bool gasse = id.x == 0.0 && id.y < 0.0;
+    bool platz = id.x == 0.0 && (id.y == 0.0 || id.y == 1.0);
+    H.da = (r < DORF && !gasse && !platz && hash(id + 5.1) > 0.1) ? 1.0 : 0.0;
+    H.W = 1.6 + 0.8 * hash(id + 1.3);
+    H.D = 1.5 + 0.7 * hash(id + 2.9);
+    H.h = 2.4 + floor(hash(id + 4.4) * 3.0) * 0.55;
+    H.rh = 1.6 + 0.8 * hash(id + 6.2);
+    // an der Gasse stehen die Haeuser traufseitig zur Strasse
+    H.dreh = abs(id.x) == 1.0 && id.y < 0.0 ? 1.0 : step(0.5, hash(id + 7.7));
+    float spiel = ZELLE * 0.5 - max(H.W, H.D) - 0.7;
+    H.ort = mitte + (vec2(hash(id + 8.1), hash(id + 9.3)) - 0.5) * 2.0 * max(spiel, 0.0);
+    // Beginn: von der Mitte nach aussen, etwas gewuerfelt, auf einen Schlag
+    // gerundet (64 Schlaege hat die Szene)
+    float beginn = 0.12 + 0.62 * clamp(r / DORF, 0.0, 1.0) + 0.1 * hash(id + 3.3);
+    beginn = floor(beginn * 40.0) / 40.0;
+    H.u = clamp((aufbau() - beginn) / 0.11, 0.0, 1.0);
+    H.vor = clamp((aufbau() - beginn + 0.05) / 0.05, 0.0, 1.0);
+    return H;
+}
+// Wie tief das Haus noch im Schnee steckt: es waechst heraus und federt nach
+float versenkt(Haus H) {
+    float x = smoothstep(0.0, 0.7, H.u);
+    float feder = 0.12 * sin(clamp((H.u - 0.55) / 0.45, 0.0, 1.0) * PI);
+    return (1.0 - x) * (H.h + H.rh + 1.2) - feder;
+}
+// p in die Lage des Hauses: Mitte des Grundrisses auf dem Boden, First entlang x
+vec3 hausLokal(vec3 p, Haus H) {
+    vec3 l = p - vec3(H.ort.x, -versenkt(H), H.ort.y);
+    return H.dreh > 0.5 ? vec3(l.z, l.y, -l.x) : l;
+}
+vec3 schornstein(Haus H) {
+    return vec3(0.45 * H.W, H.h + H.rh * 0.75 + 0.45, 0.35 * H.D);
+}
+// Abstand zum Haus; m: 1 Wand, 2 Dach, 3 Schornstein
+float hausD(vec3 l, Haus H, out float m) {
+    float wand = sdBox(l - vec3(0.0, H.h * 0.5, 0.0), vec3(H.W, H.h * 0.5, H.D));
+    m = 1.0;
+    float y = l.y - H.h;
+    vec2 n = normalize(vec2(H.rh, H.D + 0.35));
+    float dach = max(max(dot(n, vec2(abs(l.z), y)) - n.x * (H.D + 0.35), -y - 0.15), abs(l.x) - (H.W + 0.25));
+    dach -= 0.05;
+    float d = wand;
+    if (dach < d) { d = dach; m = 2.0; }
+    vec3 sc = schornstein(H);
+    float sch = sdBox(l - vec3(sc.x, (H.h + sc.y) * 0.5, sc.z), vec3(0.2, (sc.y - H.h) * 0.5, 0.2));
+    if (sch < d) { d = sch; m = 3.0; }
+    return d;
+}
+
+// --- Die Kirche ------------------------------------------------------------------
+// Schiff mit Satteldach, davor der Turm mit spitzem Helm, Uhr und Glockenstube.
+// Sie waechst als erstes aus dem Schnee.
+float kircheU() { return clamp(aufbau() / 0.14, 0.0, 1.0); }
+float kircheD(vec3 p, out float m) {
+    vec3 q = p - KIRCHE;
+    m = 4.0;
+    float huelle = sdBox(q - vec3(0.0, 11.0, 1.5), vec3(3.2, 11.0, 7.4));
+    if (huelle > 0.3) return huelle;
+    q.y += (1.0 - smoothstep(0.0, 0.8, kircheU())) * 20.0;
+    float schiff = sdBox(q - vec3(0.0, 3.2, 3.0), vec3(2.6, 3.2, 5.2));
+    m = 4.0;
+    float y = q.y - 6.4;
+    vec2 n = normalize(vec2(3.0, 2.95));
+    float dach = max(max(dot(n, vec2(abs(q.x), y)) - n.x * 2.95, -y - 0.15), abs(q.z - 3.0) - 5.4) - 0.05;
+    float d = schiff;
+    if (dach < d) { d = dach; m = 5.0; }
+    float turm = sdBox(q - vec3(0.0, 6.6, -3.6), vec3(1.5, 6.6, 1.5));
+    if (turm < d) { d = turm; m = 4.0; }
+    vec3 h = q - vec3(0.0, 13.2, -3.6);
+    vec2 hn = normalize(vec2(7.0, 1.65));
+    float helm = max(max(dot(hn, vec2(abs(h.x), h.y)), dot(hn, vec2(abs(h.z), h.y))) - hn.x * 1.65, -h.y);
+    if (helm < d) { d = helm; m = 5.0; }
+    return d;
+}
+
+// --- Der Dorfbaum ---------------------------------------------------------------
+float baumU() { return clamp((aufbau() - 0.82) / 0.12, 0.0, 1.0); }
+float dorfbaumD(vec3 p) {
+    vec3 q = p - BAUM;
+    float huelle = max(length(q.xz) - 2.2, q.y - 8.0);
+    if (huelle > 0.3) return huelle;
+    float s = smoothstep(0.0, 0.6, baumU());
+    if (s < 0.01) return 1e5;
+    q /= s;
+    float d = 1e5;
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        d = min(d, sdKegel(q - vec3(0.0, 3.0 + fi * 1.7, 0.0), 1.9 - fi * 0.45, 2.6));
+    }
+    d = min(d, max(length(q.xz) - 0.18, q.y - 0.6));
+    return d * s;
+}
+
+// --- Laternen entlang der Gasse und am Platz ------------------------------------
+const int LATERNEN = 10;
+float laterneHoch() { return smoothstep(0.76, 0.84, aufbau()); }
+vec3 laterne(int i) {
+    float fi = float(i);
+    float y = 2.7 - (1.0 - laterneHoch()) * 3.2;
+    if (i < 8) return vec3(i % 2 == 0 ? -3.2 : 3.2, y, -7.0 - floor(fi * 0.5) * 7.5);
+    return vec3(i == 8 ? -3.4 : 3.4, y, 0.2);
+}
+// Die Laternen zuenden sich zuletzt an, von der Kirche die Gasse hinab
+float laterneAn(int i) {
+    float reihe = i < 8 ? floor(float(i) * 0.5) + 1.0 : 0.0;
+    return smoothstep(0.0, 0.03, aufbau() - 0.86 - reihe * 0.025);
+}
+
+// --- Der Wald ---------------------------------------------------------------------
+// Eine Tanne je Zelle ausserhalb des Dorfes (manche fehlen), auf dem Gelaende
+// (das Raster ist gedreht, damit keine Reihen auf die Kamera zulaufen)
+const mat2 WDREH = mat2(0.8253, 0.5646, -0.5646, 0.8253);
+float tanneD(vec3 p, out float schnee) {
+    vec2 pr = WDREH * p.xz;
+    vec2 id = floor(pr / WZELLE);
+    vec2 mitteR = (id + 0.5) * WZELLE + (vec2(hash(id + 1.1), hash(id + 2.2)) - 0.5) * 1.0;
+    vec2 mitte = mitteR * WDREH;
+    float r = length(mitte);
+    // Rand der Zelle: so weit darf der Strahl auch ohne Baum
+    vec2 rel = pr - (id + 0.5) * WZELLE;
+    float rand = WZELLE * 0.5 - max(abs(rel.x), abs(rel.y)) + 0.2;
+    schnee = 0.0;
+    // ueber den Wipfeln darf der Strahl ueber die Zellgrenzen hinweg
+    float ueber = (p.y - gelaende(p.xz) - 7.0) * 0.8;
+    if (ueber > 0.0) return max(rand, ueber);
+    if (r < DORF + 3.0 || hash(id + 4.4) < 0.18) return rand;
+    float gross = 0.7 + 0.45 * hash(id + 3.3);
+    vec3 q = p - vec3(mitte.x, gelaende(mitte), mitte.y);
+    q /= gross;
+    float d = 1e5;
+    for (int i = 0; i < 3; i++) {
+        float fi = float(i);
+        d = min(d, sdKegel(q - vec3(0.0, 2.6 + fi * 1.5, 0.0), 1.3 - fi * 0.32, 2.2));
+    }
+    d = min(d, max(length(q.xz) - 0.15, q.y - 0.6));
+    return min(d * gross, rand);
+}
+
+// --- Die ganze Szene -------------------------------------------------------------
+// Material: 0 Boden, 1 Wand, 2 Dach, 3 Schornstein, 4 Kirchenwand, 5 Kirchendach,
+// 6 Tanne, 7 Laterne, 8 Dorfbaum
 float mat;
-vec3 zellInfo;   // id, Seite, Wandhoehe
+vec2 zelle;
 float szene(vec3 p) {
-    // Boden: Schnee mit flachen Wehen, an den Haeusern etwas angeweht, in der
-    // Mitte zwei Spuren
-    float boden = p.y - 0.06 * rausch(p.xz * 0.7) - 0.05 * smoothstep(1.6, 2.6, abs(p.x));
-    boden += 0.02 * smoothstep(0.25, 0.0, abs(abs(p.x) - 0.6));
-    float d = boden;
+    float d = (p.y - gelaende(p.xz)) * 0.8;
     mat = 0.0;
-    float s = sign(p.x);
-    float id = floor(p.z / ZELLE);
-    float h = wandHoehe(id, s);
-    vec3 q = vec3(abs(p.x) - (FASSADE + 1.7), p.y, p.z - (id + 0.5) * ZELLE);
-    // Wand
-    float w = sdBox(q - vec3(0.0, h * 0.5, 0.0), vec3(1.7, h * 0.5, 1.85));
-    if (w < d) { d = w; mat = 1.0; }
-    // Dach: ein Prisma, First entlang der Gasse, mit Ueberstand; die
-    // Schneeschicht macht es oben runder
-    float rh = 1.5 + hash(vec2(id, s + 4.0)) * 0.5;
-    vec2 n = normalize(vec2(1.0 / 2.0, 1.0 / rh));
-    float y = q.y - h;
-    float dach = max(max(dot(n, vec2(abs(q.x), y)) - dot(n, vec2(2.0, 0.0)), -y - 0.12), abs(q.z) - 2.0);
-    dach -= 0.06;
-    if (dach < d) { d = dach; mat = 2.0; }
-    // Laternen: alle zwei Zellen ein Pfahl am Gassenrand
-    vec3 lp = vec3(abs(p.x) - 2.25, p.y, mod(p.z, ZELLE * 2.0) - ZELLE);
-    float pfahl = length(lp.xz) - 0.05;
-    pfahl = max(pfahl, p.y - 2.5);
-    float kopf = sdBox(lp - vec3(0.0, 2.6, 0.0), vec3(0.12, 0.16, 0.12));
-    pfahl = min(pfahl, kopf);
-    if (pfahl < d) { d = pfahl; mat = 3.0; }
-    zellInfo = vec3(id, s, h);
+    // das Haus der Zelle -- oder, wo keins steht, der Abstand bis zum Zellrand
+    vec2 id = floor((p.xz + ZELLE * 0.5) / ZELLE);
+    vec2 rel = p.xz + ZELLE * 0.5 - (id + 0.5) * ZELLE;
+    float rand = ZELLE * 0.5 - max(abs(rel.x), abs(rel.y)) + 0.3;
+    zelle = id;
+    if (length(p.xz) < DORF + ZELLE) {
+        Haus H = hausIn(id);
+        rand = max(rand, p.y - 7.6);
+        if (H.da > 0.5 && H.u > 0.0) {
+            float hm;
+            float hd = min(hausD(hausLokal(p, H), H, hm), rand);
+            if (hd < d) { d = hd; mat = hm; }
+        } else {
+            d = min(d, rand);
+        }
+    }
+    float km;
+    float kd = kircheD(p, km);
+    if (kd < d) { d = kd; mat = km; }
+    float s;
+    float td = tanneD(p, s);
+    if (td < d) { d = td; mat = 6.0; }
+    float bd = dorfbaumD(p);
+    if (bd < d) { d = bd; mat = 8.0; }
+    // die Laternen: Pfahl und Kopf
+    float lh = sdBox(p - vec3(0.0, 1.6, -13.5), vec3(3.8, 1.6, 14.5));
+    if (lh > 0.3) return min(d, lh);
+    for (int i = 0; i < LATERNEN; i++) {
+        vec3 lq = p - laterne(i);
+        float pf = max(length(lq.xz) - 0.06, lq.y);
+        pf = max(pf, -lq.y - 2.8);
+        pf = min(pf, sdBox(lq - vec3(0.0, 0.18, 0.0), vec3(0.14, 0.2, 0.14)));
+        if (pf < d) { d = pf; mat = 7.0; }
+    }
     return d;
 }
 
 vec3 normale(vec3 p) {
-    vec2 e = vec2(0.002, 0.0);
+    vec2 e = vec2(0.003, 0.0);
     return normalize(vec3(szene(p + e.xyy) - szene(p - e.xyy), szene(p + e.yxy) - szene(p - e.yxy), szene(p + e.yyx) - szene(p - e.yyx)));
 }
 
 // Die Fassade: Fachwerk aus dunklen Balken auf hellem Putz, Fenster in zwei
-// Geschossen, Andreaskreuze unter den Fenstern. Liefert die Farbe und in
-// `fenster` das warme Licht, das aus dem Fenster kommt.
+// Geschossen (so viele, wie die Wand breit ist), Andreaskreuze darunter. f ist
+// die Lage auf der Wand (Mitte = 0), W ihre halbe Breite. In `fenster` das
+// warme Licht, das herauskommt; `licht` sagt, wie weit das Haus erleuchtet ist.
 float fenster;
-vec3 fassade(vec2 f, float id, float s, float h) {
+vec3 fassade(vec2 f, float W, float h, float seed, float licht) {
     fenster = 0.0;
     vec3 putz = vec3(0.82, 0.76, 0.66);
-    float balken = 0.0;
     float b = 0.055;
-    // Pfosten und Riegel
-    balken = max(balken, step(abs(abs(f.x) - 1.78), b));
-    balken = max(balken, step(abs(abs(f.x) - 0.6), b * 0.8));
+    float balken = 0.0;
+    balken = max(balken, step(abs(abs(f.x) - W + 0.04), b));
     balken = max(balken, step(abs(f.y - 0.06), b));
     balken = max(balken, step(abs(f.y - 1.45), b));
     balken = max(balken, step(abs(f.y - (h - 0.08)), b));
-    if (h > 3.0) balken = max(balken, step(abs(f.y - 2.75), b));
-    // Fenster: drei je Geschoss
-    float spalte = clamp(floor((f.x + 1.8) / 1.2), 0.0, 2.0);
-    float u = f.x - (-1.2 + spalte * 1.2);
-    for (int g = 0; g < 2; g++) {
-        float unten = g == 0 ? 0.55 : 1.75;
-        float oben = unten + 0.75;
+    if (h > 3.2) balken = max(balken, step(abs(f.y - 2.8), b));
+    float n = max(1.0, floor(2.0 * W / 1.15));
+    float spalte = clamp(floor((f.x + n * 0.575) / 1.15), 0.0, n - 1.0);
+    float u = f.x - (-(n - 1.0) * 0.575 + spalte * 1.15);
+    balken = max(balken, step(abs(abs(u) - 0.575), b * 0.8) * step(abs(f.x), W - 0.3));
+    for (int g = 0; g < 3; g++) {
+        float unten = 0.55 + float(g) * 1.2;
+        float oben = unten + 0.72;
         if (oben > h - 0.2) break;
         float v = f.y - (unten + oben) * 0.5;
-        if (abs(u) < 0.27 && abs(v) < 0.375) {
-            float an = step(0.28, hash(vec2(id * 3.0 + spalte, s * 7.0 + float(g))));
-            // Sprossenkreuz und Rahmen
+        if (abs(u) < 0.27 && abs(v) < 0.36) {
+            float wurf = hash(vec2(seed + spalte * 3.1, float(g) * 7.0 + W));
+            float an = step(0.2, wurf) * step(fract(wurf * 13.7), licht);
             float sprosse = step(abs(u), 0.022) + step(abs(v - 0.06), 0.022);
-            float rahmen = step(0.24, abs(u)) + step(0.345, abs(v));
+            float rahmen = step(0.24, abs(u)) + step(0.33, abs(v));
             if (sprosse + rahmen > 0.0) {
                 balken = 1.0;
             } else {
-                // drinnen: warmes Licht, ein Vorhang an den Seiten
                 float vorhang = smoothstep(0.12, 0.2, abs(u));
                 vec3 innen = mix(vec3(1.0, 0.62, 0.28), vec3(0.75, 0.25, 0.12), vorhang * 0.6);
-                fenster = an * (0.9 + 0.1 * sin(time * 3.0 + spalte * 5.0 + id));
-                // ein Schwibbogen: ein Bogen aus sieben kleinen Lichtern
-                if (hash(vec2(id + 13.0, s + spalte * 2.0 + float(g))) < 0.35 && an > 0.5) {
+                fenster = an * (0.9 + 0.1 * sin(time * 3.0 + spalte * 5.0 + seed));
+                // in manchen ein Schwibbogen
+                if (fract(wurf * 31.3) < 0.35 && an > 0.5) {
                     vec2 bm = vec2(u, v + 0.3);
                     float lichter = 0.0;
                     for (int k = 0; k < 7; k++) {
                         float a = 0.3 + float(k) * 0.42;
-                        vec2 lpos = vec2(cos(a), sin(a)) * 0.2;
-                        lichter += smoothstep(0.024, 0.0, length(bm - lpos));
+                        lichter += smoothstep(0.024, 0.0, length(bm - vec2(cos(a), sin(a)) * 0.2));
                     }
                     float bogen = smoothstep(0.012, 0.0, abs(length(bm) - 0.17)) * step(0.0, bm.y);
                     innen = innen * 0.3 + vec3(0.25, 0.12, 0.05) * bogen + vec3(1.0, 0.85, 0.5) * clamp(lichter * 2.0, 0.0, 1.0);
@@ -138,16 +328,12 @@ vec3 fassade(vec2 f, float id, float s, float h) {
             }
         }
     }
-    // Andreaskreuze unter den Fenstern
     float vv = f.y - 0.3;
     if (abs(u) < 0.5 && abs(vv) < 0.22) {
-        float x1 = abs(vv - u * 0.44);
-        float x2 = abs(vv + u * 0.44);
-        balken = max(balken, step(min(x1, x2), 0.035));
+        balken = max(balken, step(min(abs(vv - u * 0.44), abs(vv + u * 0.44)), 0.035));
     }
-    vec3 holz = vec3(0.12, 0.06, 0.035);
     putz *= 0.85 + 0.15 * rausch(f * 7.0);
-    return mix(putz, holz, balken);
+    return mix(putz, vec3(0.12, 0.06, 0.035), balken);
 }
 
 vec3 sterne(vec3 d) {
@@ -161,23 +347,16 @@ vec3 sterne(vec3 d) {
 
 vec3 himmel(vec3 d) {
     float h = clamp(d.y, 0.0, 1.0);
-    vec3 c = mix(vec3(0.05, 0.08, 0.17), vec3(0.008, 0.012, 0.04), pow(h, 0.6));
+    vec3 c = mix(vec3(0.06, 0.09, 0.19), vec3(0.008, 0.012, 0.04), pow(h, 0.6));
     c += sterne(d) * (1.0 + 1.0 * ton);
     float m = dot(d, MOND);
     c += vec3(0.95, 0.95, 0.88) * smoothstep(0.99935, 0.9996, m);
     c += vec3(0.25, 0.3, 0.45) * pow(max(m, 0.0), 120.0) * 1.2;
     c += vec3(0.12, 0.14, 0.22) * pow(max(m, 0.0), 8.0) * 0.4;
-    // der Kirchturm am Ende der Gasse, als Schattenriss vor dem Himmel
+    // Berge in der Ferne
     float az = atan(d.x, d.z);
-    float turm = step(abs(az - 0.02), 0.016) * step(d.y, 0.085);
-    float spitze = step(abs(az - 0.02), 0.016 * (1.0 - (d.y - 0.085) / 0.075)) * step(d.y, 0.16);
-    float zifferblatt = smoothstep(0.0075, 0.0055, length(vec2(az - 0.02, d.y - 0.066)));
-    float sil = max(turm, spitze);
-    c = mix(c, vec3(0.012, 0.014, 0.028), sil);
-    c += vec3(1.0, 0.75, 0.4) * zifferblatt * 0.9;
-    // Huegel in der Ferne
-    float huegel = 0.035 + 0.02 * sin(az * 6.0 + 1.0) + 0.012 * sin(az * 17.0);
-    c = mix(c, vec3(0.06, 0.08, 0.14), step(d.y, huegel) * (1.0 - sil));
+    float berg = 0.05 + 0.03 * sin(az * 5.0 + 1.0) + 0.015 * sin(az * 13.0) + 0.006 * sin(az * 41.0);
+    c = mix(c, vec3(0.08, 0.1, 0.17), smoothstep(berg + 0.002, berg - 0.002, d.y));
     return c;
 }
 
@@ -194,37 +373,46 @@ vec3 stern(vec2 uv) {
     return c * ende;
 }
 
-// Das Licht der Laternen auf Schnee und Waenden: weiche Flecken, ohne Schatten
+// Das Licht der Laternen auf Schnee und Waenden
 vec3 laternenLicht(vec3 p, vec3 n) {
     vec3 l = vec3(0.0);
-    float zid = floor(p.z / (ZELLE * 2.0));
-    for (int k = -1; k <= 1; k++) {
-        float z = (zid + float(k)) * ZELLE * 2.0 + ZELLE;
-        for (int s = 0; s < 2; s++) {
-            vec3 lp = vec3(s == 0 ? -2.25 : 2.25, 2.6, z);
-            vec3 v = lp - p;
-            float dd = dot(v, v);
-            l += vec3(1.0, 0.68, 0.35) * max(dot(n, v / sqrt(dd)), 0.0) / (1.0 + dd * 0.9) * 2.4 * (1.0 + 0.3 * kick);
-        }
+    for (int i = 0; i < LATERNEN; i++) {
+        vec3 v = laterne(i) + vec3(0.0, 0.15, 0.0) - p;
+        float dd = dot(v, v);
+        l += vec3(1.0, 0.68, 0.35) * max(dot(n, v * inversesqrt(dd)), 0.0) / (1.0 + dd * 0.35) * 3.0 * laterneAn(i) * (1.0 + 0.3 * kick);
     }
     return l;
 }
-
 vec3 laternenGlanz(vec3 ro, vec3 rd, float tmax) {
     vec3 c = vec3(0.0);
-    float zid = floor(ro.z / (ZELLE * 2.0));
-    for (int k = 0; k < 6; k++) {
-        float z = (zid + float(k)) * ZELLE * 2.0 + ZELLE;
-        for (int s = 0; s < 2; s++) {
-            vec3 lp = vec3(s == 0 ? -2.25 : 2.25, 2.6, z);
-            float tc = dot(lp - ro, rd);
-            if (tc < 0.0 || tc > tmax + 0.3) continue;
-            vec3 q = ro + rd * tc - lp;
-            float d2 = dot(q, q);
-            c += vec3(1.0, 0.72, 0.38) * (exp(-d2 * 40.0) * 2.4 + exp(-d2 * 2.0) * 0.16) * (1.0 + 0.4 * kick);
-        }
+    for (int i = 0; i < LATERNEN; i++) {
+        vec3 lp = laterne(i) + vec3(0.0, 0.15, 0.0);
+        float tc = dot(lp - ro, rd);
+        if (tc < 0.0 || tc > tmax + 0.3) continue;
+        vec3 q = ro + rd * tc - lp;
+        float d2 = dot(q, q) / max(tc * 0.02, 1.0);
+        c += vec3(1.0, 0.72, 0.38) * (exp(-d2 * 30.0) * 2.4 + exp(-d2 * 1.5) * 0.2) * laterneAn(i) * (1.0 + 0.4 * kick);
     }
     return c;
+}
+
+// Rauch aus den Schornsteinen: eine Saeule, die breiter wird und im Wind
+// treibt, mit Rauschen; Dichte an der Stelle p
+float rauch(vec3 p) {
+    vec2 id = floor((p.xz + ZELLE * 0.5) / ZELLE);
+    if (length(p.xz) > DORF + ZELLE) return 0.0;
+    Haus H = hausIn(id);
+    if (H.da < 0.5 || H.u < 0.9) return 0.0;
+    vec3 sc = schornstein(H);
+    vec3 top = H.dreh > 0.5 ? vec3(-sc.z, sc.y, sc.x) : sc;
+    top += vec3(H.ort.x, 0.0, H.ort.y);
+    vec3 v = p - top;
+    if (v.y < 0.0 || v.y > 7.0) return 0.0;
+    vec2 trieb = vec2(0.35, 0.12) * v.y;
+    float rr = 0.25 + v.y * 0.16;
+    float dichte = exp(-dot(v.xz - trieb, v.xz - trieb) / (rr * rr)) * (1.0 - v.y / 7.0);
+    dichte *= smoothstep(0.9, 1.0, H.u) * (0.4 + 0.9 * rausch(vec2(v.y * 1.3 - time * 0.9, (v.x + v.z) * 1.5 + H.seed)));
+    return dichte;
 }
 
 float uebHash(float x) { return fract(sin(x * 91.7) * 43758.5453); }
@@ -254,72 +442,189 @@ vec3 uebergang(vec3 c, vec2 uv) {
 
 void main() {
     vec2 uv = (fragTexCoord * resolution - 0.5 * resolution) / resolution.y;
-    // Kamera: geht die Gasse hinauf, schaukelt ein wenig im Schritt; im
-    // Abspann bleibt sie stehen und hebt den Blick
-    float z = 2.0 + fort * 34.0;
-    vec3 ro = vec3(0.35 * sin(z * 0.25), 1.65 + 0.03 * sin(z * 3.1), z);
-    float hebe = ende * 0.45;
-    vec3 vorne = normalize(vec3(0.05 * sin(time * 0.13), 0.06 + hebe, 1.0));
+    // Kamera: erst ein weiter Bogen hoch ueber dem Tal, waehrend das Dorf
+    // waechst, dann hinab in die Gasse vor der Kirche; im Abspann hebt sie
+    // den Blick
+    float s = smoothstep(0.0, 0.62, fort);
+    float w = -PI * 0.5 - 0.75 + 1.05 * s;
+    float R = mix(62.0, 36.0, s);
+    vec3 roA = vec3(cos(w) * R, mix(34.0, 15.0, s), sin(w) * R);
+    vec3 taA = vec3(0.0, mix(9.0, 3.0, s), 0.0);
+    float e = smoothstep(0.62, 0.97, fort);
+    vec3 roB = vec3(0.8, 1.9, -24.0);
+    vec3 taB = vec3(0.0, 5.0, 6.0);
+    vec3 ro = mix(roA, roB, vec3(e, e * e, e));
+    vec3 ta = mix(taA, taB, e);
+    ta.y += ende * 6.0;
+    vec3 vorne = normalize(ta - ro);
     vec3 rechts = normalize(cross(vec3(0, 1, 0), vorne));
     vec3 oben = cross(vorne, rechts);
-    vec3 rd = normalize(vorne * 1.3 + uv.x * rechts + uv.y * oben);
+    vec3 rd = normalize(vorne * 1.4 + uv.x * rechts + uv.y * oben);
 
-    vec3 nebel = vec3(0.06, 0.08, 0.15);
+    vec3 nebel = vec3(0.07, 0.09, 0.17);
     vec3 c;
     float t = 0.0;
     float hit = -1.0;
-    int schritte = int(120.0 * G());
-    for (int i = 0; i < 120; i++) {
+    float qualm = 0.0;
+    int schritte = int(150.0 * G());
+    for (int i = 0; i < 150; i++) {
         if (i >= schritte) break;
         vec3 p = ro + rd * t;
         float d = szene(p);
-        if (d < 0.001 * t + 0.0005) { hit = t; break; }
-        t += d * 0.85;
-        if (t > 70.0) break;
+        if (d < 0.0012 * t + 0.0005) { hit = t; break; }
+        float schritt = d * 0.85;
+        // im Rauch kleinere Schritte, damit er sich sammelt
+        float r = rauch(p);
+        if (r > 0.002) schritt = min(schritt, 0.45);
+        qualm += r * schritt;
+        t += schritt;
+        if (t > 160.0) break;
+        // gehen die Schritte aus, nahe an etwas: dort zaehlt es als Treffer
+        // (sonst malte der Himmel dunkle Vorhaenge ueber den Wald)
+        if (i == schritte - 1 && d < 0.5) hit = t;
     }
-    float tmax = 70.0;
+    float tmax = 160.0;
     if (hit > 0.0) {
         tmax = hit;
         vec3 p = ro + rd * hit;
         szene(p);
         float m = mat;
-        vec3 zi = zellInfo;
+        vec2 zi = zelle;
         vec3 n = normale(p);
         float mond = max(dot(n, MOND), 0.0);
-        vec3 himmelLicht = vec3(0.07, 0.09, 0.16) * (0.6 + 0.4 * n.y);
+        vec3 himmelLicht = vec3(0.08, 0.1, 0.18) * (0.6 + 0.4 * n.y);
         vec3 alb;
         vec3 eigen = vec3(0.0);
-        if (m < 0.5 || (m > 1.5 && m < 2.5 && n.y > 0.35) || (m > 0.5 && m < 1.5 && n.y > 0.7)) {
-            // Schnee: weiss mit kaltem Schimmer, funkelt im Licht
+        bool schnee = m < 0.5 || (n.y > 0.45 && m < 5.5) || (m > 5.5 && m < 6.5 && n.y > 0.1 && rausch(p.xz * 6.0 + p.y * 3.0) > 0.35) || (m > 7.5 && n.y > 0.3 && rausch(p.xz * 5.0 + p.y * 4.0) > 0.55);
+        if (m > 5.5 && m < 6.5 && !schnee) {
+            alb = vec3(0.02, 0.07, 0.04) * (0.7 + 0.6 * rausch(p.xz * 9.0 + p.y * 7.0));
+        } else if (m > 7.5 && !schnee) {
+            // der Dorfbaum: Tannengruen mit bunten Lichtern
+            vec3 q = p - BAUM;
+            vec2 g = vec2(atan(q.z, q.x) * 3.0, q.y * 2.2);
+            vec2 gi = floor(g);
+            float lampe = smoothstep(0.22, 0.08, length(fract(g) - 0.5)) * step(0.35, hash(gi));
+            float wahl = hash(gi + 3.0);
+            vec3 lf = wahl < 0.33 ? vec3(1.0, 0.25, 0.15) : wahl < 0.66 ? vec3(1.0, 0.8, 0.3) : vec3(0.3, 0.55, 1.0);
+            alb = vec3(0.02, 0.08, 0.04);
+            eigen += lf * lampe * 3.0 * (0.7 + 0.3 * sin(time * 4.0 + wahl * 30.0)) * baumU();
+        } else if (schnee) {
             alb = vec3(0.85, 0.9, 1.0);
             float funkel = step(0.995, hash(floor(p.xz * 60.0) + floor(time * 4.0)));
             eigen += vec3(1.0) * funkel * 0.6 * (1.0 + ton);
+        } else if (m > 1.5 && m < 2.5 && abs(n.y) < 0.3) {
+            // das Giebeldreieck: Putz mit Stiel und Riegel
+            Haus H = hausIn(zi);
+            vec3 l = hausLokal(p, H);
+            float balken = max(step(abs(l.z), 0.06), step(abs(l.y - H.h - H.rh * 0.4), 0.05));
+            alb = mix(vec3(0.8, 0.74, 0.64) * (0.85 + 0.15 * rausch(l.zy * 7.0)), vec3(0.12, 0.06, 0.035), balken);
         } else if (m < 1.5) {
-            // Fassade, nur an der Seite zur Gasse
-            if (abs(n.x) > 0.7) {
-                alb = fassade(vec2(p.z - (zi.x + 0.5) * ZELLE, p.y), zi.x, zi.y, zi.z);
-                eigen += alb * fenster * 1.6;
-                alb *= 1.0 - fenster;
+            // Hauswand
+            Haus H = hausIn(zi);
+            vec3 l = hausLokal(p, H);
+            vec3 ln = H.dreh > 0.5 ? vec3(n.z, n.y, -n.x) : n;
+            float licht = smoothstep(0.75, 1.0, H.u);
+            if (abs(ln.z) > 0.7) {
+                alb = fassade(vec2(l.x, l.y), H.W, H.h, H.seed + sign(ln.z), licht);
             } else {
-                alb = vec3(0.5, 0.46, 0.42);
+                alb = fassade(vec2(l.z, l.y), H.D, H.h, H.seed + 5.0 + sign(ln.x), licht);
             }
+            eigen += alb * fenster * 1.7;
+            alb *= 1.0 - fenster;
+            // ein Haus, das gerade fertig wird, glueht kurz golden auf
+            eigen += vec3(1.0, 0.7, 0.35) * 0.35 * smoothstep(0.6, 0.85, H.u) * (1.0 - smoothstep(0.85, 1.0, H.u));
         } else if (m < 2.5) {
-            alb = vec3(0.18, 0.07, 0.05);   // Ziegel unter dem Schnee, an der Traufe
+            alb = vec3(0.2, 0.08, 0.05);   // Ziegel unter dem Schnee, an der Traufe
+        } else if (m < 3.5) {
+            alb = vec3(0.3, 0.12, 0.08);
+        } else if (m < 4.5) {
+            // die Kirche: heller Putz, hohe Fenster in warmem Buntglas, am Turm
+            // die Uhr und die Glockenstube
+            vec3 q = p - KIRCHE;
+            q.y += (1.0 - smoothstep(0.0, 0.8, kircheU())) * 20.0;
+            alb = vec3(0.78, 0.74, 0.68) * (0.85 + 0.15 * rausch(p.xy * 5.0 + p.z));
+            float an = smoothstep(0.6, 1.0, kircheU());
+            vec2 f = abs(n.x) > 0.7 ? vec2(q.z, q.y) : vec2(q.x, q.y);
+            if (abs(n.x) > 0.7 && q.z > -2.0) {
+                // Fenster im Schiff: Spitzbogen, alle 2.4 Einheiten
+                float fz = mod(q.z - 0.2, 2.4) - 1.2;
+                vec2 fp = vec2(fz, q.y - 3.0);
+                float fe = max(abs(fp.x) - 0.42, abs(fp.y) - 1.3);
+                fe = min(fe, length(vec2(abs(fp.x) + 0.25, fp.y - 1.3)) - 0.67);
+                fe = max(fe, -fp.y - 1.3);
+                if (fe < 0.0) {
+                    vec2 bg = floor(fp * vec2(5.0, 4.0));
+                    float wahl = hash(bg);
+                    vec3 glas = wahl < 0.3 ? vec3(1.0, 0.35, 0.15) : wahl < 0.6 ? vec3(1.0, 0.75, 0.3) : wahl < 0.8 ? vec3(0.4, 0.5, 1.0) : vec3(0.4, 0.9, 0.5);
+                    float blei = step(0.85, max(fract(fp.x * 5.0), fract(fp.y * 4.0)));
+                    alb = vec3(0.05);
+                    eigen += glas * (1.0 - blei) * 1.4 * an;
+                }
+            }
+            if (abs(n.z) > 0.7 && q.z < -2.0) {
+                // Turm: Uhr und Schallfenster der Glockenstube
+                vec2 u2 = vec2(q.x, q.y - 10.0);
+                float r = length(u2);
+                if (r < 0.75) {
+                    float wz = atan(u2.x, u2.y);
+                    float zeiger = step(abs(u2.x), 0.035) * step(0.0, u2.y) * step(u2.y, 0.6);
+                    zeiger = max(zeiger, step(abs(u2.x * cos(0.5) - u2.y * sin(0.5)), 0.05) * step(r, 0.42) * step(0.0, u2.x * sin(0.5) + u2.y * cos(0.5)));
+                    float strich = step(0.6, r) * step(abs(mod(wz + PI / 12.0, PI / 6.0) - PI / 12.0) * r, 0.03);
+                    alb = vec3(0.05);
+                    eigen += vec3(1.0, 0.8, 0.5) * (1.0 - max(zeiger, strich) * 0.9) * 1.2 * an;
+                }
+                vec2 sf = vec2(abs(q.x) - 0.5, q.y - 11.8);
+                if (abs(sf.x) < 0.25 && abs(sf.y) < 0.5) {
+                    alb = vec3(0.02);
+                    eigen += vec3(1.0, 0.65, 0.3) * 0.6 * (0.6 + 0.4 * kick) * an;
+                }
+                // die Tuer
+                if (abs(q.x) < 0.6 && q.y < 2.1 && q.y > 0.0) {
+                    alb = vec3(0.15, 0.07, 0.03);
+                    eigen += vec3(1.0, 0.6, 0.25) * 0.4 * an * step(abs(q.x), 0.55) * step(q.y, 2.0) * step(0.03, abs(q.x));
+                }
+            }
+        } else if (m < 5.5) {
+            alb = vec3(0.18, 0.2, 0.24);
+        } else if (m < 6.5) {
+            alb = vec3(0.02, 0.07, 0.04);
         } else {
             alb = vec3(0.03);
+            // der Kopf der Laterne leuchtet
+            for (int i = 0; i < LATERNEN; i++) {
+                vec3 lq = p - laterne(i);
+                if (abs(lq.y - 0.18) < 0.21 && length(lq.xz) < 0.2) eigen += vec3(1.0, 0.75, 0.4) * 2.0 * laterneAn(i);
+            }
         }
-        vec3 licht = himmelLicht * 1.4 + vec3(0.5, 0.58, 0.8) * mond * 0.7 + laternenLicht(p, n);
-        // das Licht der Fenster faellt auf den Schnee vor dem Haus
+        vec3 licht = himmelLicht * 1.6 + vec3(0.5, 0.58, 0.8) * mond * 0.9 + laternenLicht(p, n);
+        // Fensterlicht faellt auf den Schnee vor den Haeusern
         if (m < 0.5) {
-            float zz = p.z - (floor(p.z / ZELLE) + 0.5) * ZELLE;
-            float vorDem = smoothstep(1.4, FASSADE, abs(p.x));
-            licht += vec3(1.0, 0.6, 0.3) * vorDem * (0.5 + 0.5 * cos(zz * 2.6)) * 0.45;
+            Haus H = hausIn(zi);
+            if (H.da > 0.5) {
+                vec3 l = hausLokal(p, H);
+                vec2 aussen = max(abs(l.xz) - vec2(H.W, H.D), 0.0);
+                float ab = length(aussen);
+                licht += vec3(1.0, 0.6, 0.3) * 0.6 * exp(-ab * 1.3) * smoothstep(0.75, 1.0, H.u);
+                // Schneestaub um ein Haus, das gerade herauswaechst
+                eigen += vec3(0.6, 0.65, 0.75) * exp(-ab * 1.5) * sin(clamp(H.u / 0.75, 0.0, 1.0) * PI) * 0.5;
+                // kurz bevor es kommt, leuchtet sein Grundriss golden im Schnee
+                vec2 kante = abs(l.xz) - vec2(H.W, H.D);
+                float rahmen = abs(length(max(kante, 0.0)) + min(max(kante.x, kante.y), 0.0));
+                float glut = H.vor * (1.0 - smoothstep(0.2, 0.6, H.u));
+                eigen += vec3(1.0, 0.7, 0.3) * (exp(-rahmen * 14.0) * 2.0 + exp(-rahmen * 2.5) * 0.25) * glut;
+            }
+            vec3 kq = p - KIRCHE;
+            float ka = length(max(abs(kq.xz - vec2(0.0, 1.0)) - vec2(2.6, 6.6), 0.0));
+            eigen += vec3(0.6, 0.65, 0.75) * exp(-ka * 1.0) * sin(clamp(kircheU() / 0.8, 0.0, 1.0) * PI) * 0.6;
+            licht += vec3(1.0, 0.75, 0.4) * 0.5 * exp(-length(p.xz - BAUM.xz) * 0.5) * baumU();
         }
         c = alb * licht + eigen;
-        c = mix(c, nebel, 1.0 - exp(-hit * 0.035));
+        c = mix(c, nebel, 1.0 - exp(-hit * 0.012));
     } else {
         c = himmel(rd);
     }
+    // der Rauch, vom Mond und den Fenstern unten angeleuchtet
+    c = mix(c, vec3(0.32, 0.34, 0.42), 1.0 - exp(-qualm * 0.9));
     c += laternenGlanz(ro, rd, tmax);
     if (ende > 0.0) c += stern(uv);
     c *= 1.0 - 0.32 * dot(uv * 0.9, uv * 0.9);
@@ -334,7 +639,9 @@ void main() {
 // Der Adventskranz: Tannengruen auf einem Holztisch, vier rote Kerzen, rotes
 // Samtband, Beeren. `kerzen` (0..4) sagt, wie viele brennen (mit Bruchteil: die
 // naechste entzuendet sich gerade), `fokus` (0..1) faehrt die Kamera in die
-// Flamme der Kerze `ziel` hinein -- dort beginnt das naechste Kapitel. Im
+// Flamme der Kerze `ziel` hinein -- dort beginnt das naechste Kapitel. Die
+// Kamera steht dabei immer vor dieser Kerze, damit die Fahrt frei in sie
+// hineingeht und keine andere davor steht. Im
 // Hintergrund unscharfe Lichter einer Lichterkette. Text und Zeichnungen der
 // Demo liegen in texture0 und werden obenauf gelegt.
 in vec2 fragTexCoord;
@@ -345,6 +652,8 @@ uniform float hell;      // Blende: 0 schwarz .. 1 voll
 uniform float kerzen;    // wie viele Kerzen brennen
 uniform float fokus;     // Fahrt in die Flamme
 uniform float ziel;      // ... welcher Kerze
+uniform float phase;     // wie weit das Zwischenspiel ist (0..1)
+uniform float bogen;     // wie weit die Kamera dabei um den Kranz zieht
 uniform float kick;
 uniform float ton;
 uniform float hoehe;
@@ -498,6 +807,9 @@ vec3 flammenLicht(vec3 ro, vec3 rd, float tmax) {
         vec3 fl = mix(vec3(1.0, 0.45, 0.08), vec3(1.0, 0.95, 0.75), smoothstep(0.2, 0.9, kern));
         fl = mix(vec3(0.25, 0.4, 1.0), fl, smoothstep(-0.05, -0.015, y));
         c += fl * kern * 3.5 * b;
+        // beim Entzuenden flammt sie kurz auf
+        float auf = sin(b * 3.14159) * step(b, 0.999);
+        c += vec3(1.0, 0.75, 0.4) * auf * (exp(-dot(q, q) * 160.0) * 2.5 + exp(-dot(q, q) * 18.0) * 0.5);
         // Schein
         float d2 = dot(q, q);
         c += vec3(1.0, 0.6, 0.25) * exp(-d2 * 45.0) * 0.55 * b * (1.0 + 0.4 * ton);
@@ -535,13 +847,18 @@ void main() {
     vec2 uv = (fragTexCoord * resolution - 0.5 * resolution) / resolution.y;
     // Kamera: kreist langsam schraeg ueber dem Kranz; mit `fokus` faehrt sie
     // auf die Flamme der Zielkerze zu, bis sie das Bild fuellt
-    float w = 0.9 + time * 0.06;
+    // vor der Zielkerze, ein wenig seitlich, und waehrend des Zwischenspiels
+    // zieht sie langsam auf sie zu
+    float w = kerzenWinkel(ziel) + 0.35 + bogen * (1.0 - phase);
     vec3 ro = vec3(cos(w) * 2.9, 1.75, sin(w) * 2.9);
     vec3 ta = vec3(0.0, 0.25, 0.0);
     vec3 fz = flamme(ziel);
     float f = fokus * fokus * (3.0 - 2.0 * fokus);
     ro = mix(ro, fz + normalize(ro - fz) * 0.12 + vec3(0.0, 0.02, 0.0), f);
-    ta = mix(ta, fz + vec3(0.0, 0.03, 0.0), smoothstep(0.0, 0.6, fokus));
+    // gleich nach dem Entzuenden richtet sie den Blick auf die neue Flamme --
+    // dort, in der Bildmitte, oeffnet sich dann das Licht des Uebergangs
+    float blick = max(smoothstep(0.4, 0.62, phase), smoothstep(0.0, 0.6, fokus));
+    ta = mix(ta, fz + vec3(0.0, 0.03, 0.0), blick);
     vec3 vorne = normalize(ta - ro);
     vec3 rechts = normalize(cross(vec3(0, 1, 0), vorne));
     vec3 oben = cross(vorne, rechts);
@@ -629,11 +946,15 @@ void main() {
 }
 #version 330
 // Der Weihnachtsmarkt: ein Platz mit Kopfstein unter Schnee, ringsum
-// Holzbuden mit leuchtender Theke und Lichterketten an der Traufe, aus den
-// Gluehweinbuden steigt Dampf. In der Mitte ein Karussell mit rot-weissem
-// Dach und Pferden -- es dreht sich auf der Audio-Uhr (`takt`), die Pferde
-// heben und senken sich im Takt, die Lichter laufen mit der Bassdrum um.
-// Die Kamera umkreist den Platz (`fort`).
+// Holzbuden mit Tannengirlande und Lichterkette an der Traufe; auf den
+// Theken Gluehweintassen, Kugeln oder brennende Kerzen, an mancher haengen
+// Lebkuchenherzen, aus den Gluehweinbuden steigt Dampf. Vom Karussell zu
+// jeder Bude spannt sich eine Lichterkette. Leute in Mantel und Pudelmuetze
+// schlendern auf zwei Bahnen um den Platz, andere stehen an den Buden. In
+// der Mitte das Karussell mit rot-weissem Dach, Spiegelsaeule, goldener
+// Krone und bunten Pferden -- es dreht sich auf der Audio-Uhr (`takt`), die
+// Pferde heben und senken sich im Takt, die Lichter laufen mit der
+// Bassdrum um. Die Kamera umkreist den Platz (`fort`).
 in vec2 fragTexCoord;
 uniform sampler2D texture0;
 uniform vec2 resolution;
@@ -691,10 +1012,37 @@ vec2 drehe(vec2 p, float a) {
 
 float drehung() { return takt * 0.55; }
 
+// Ein Mensch, der geht (`schritt` = Phase des Schritts, 0 = steht): Mantel,
+// Kopf, Pudelmuetze, zwei Beine. Blick in +z. teil: 0 Mantel, 1 Gesicht,
+// 2 Muetze, 3 Hose
+float menschTeil;
+float mensch(vec3 p, float gross, float schritt) {
+    p /= gross;
+    p.y -= 0.03 * abs(sin(schritt));
+    float mantel = min(kapsel(p, vec3(0.0, 0.55, 0.0), vec3(0.0, 0.92, 0.0), 0.21), kapsel(p, vec3(0.0, 0.92, 0.0), vec3(0.0, 1.3, 0.0), 0.17));
+    float d = mantel;
+    menschTeil = 0.0;
+    float kopf = length(p - vec3(0.0, 1.53, 0.02)) - 0.105;
+    if (kopf < d) { d = kopf; menschTeil = 1.0; }
+    float muetze = max(length(p - vec3(0.0, 1.57, 0.0)) - 0.112, 1.56 - p.y);
+    muetze = min(muetze, length(p - vec3(0.0, 1.72, -0.02)) - 0.045);
+    if (muetze < d) { d = muetze; menschTeil = 2.0; }
+    float sw = 0.16 * sin(schritt);
+    float bein = min(kapsel(p, vec3(0.08, 0.55, 0.0), vec3(0.08, 0.05, sw), 0.06), kapsel(p, vec3(-0.08, 0.55, 0.0), vec3(-0.08, 0.05, -sw), 0.06));
+    if (bein < d) { d = bein; menschTeil = 3.0; }
+    // Arme, gegen die Beine schwingend
+    float arm = min(kapsel(p, vec3(0.2, 1.25, 0.0), vec3(0.25, 0.82, -sw * 0.8), 0.055), kapsel(p, vec3(-0.2, 1.25, 0.0), vec3(-0.25, 0.82, sw * 0.8), 0.055));
+    if (arm < d) { d = arm; menschTeil = 0.0; }
+    return d * gross;
+}
+
 // Material: 0 Boden, 1 Bude, 2 Budendach, 3 Theke (leuchtet), 4 Karussell-
-// Boden/Saeulen, 5 Karussell-Dach, 6 Pferd
+// Boden/Saeulen, 5 Karussell-Dach, 6 Pferd, 7 Mensch, 8 Thekenbrett,
+// 9 Ware, 10 Girlande, 11 Lebkuchenherz
 float mat;
 float budeId;
+float teilId;
+float personId;
 // die Gluehbirnen: Abstand zur naechsten und ihre Farbe
 float birneD;
 vec3 birneF;
@@ -714,6 +1062,46 @@ float szene(vec3 p) {
     if (bude < d) { d = bude; mat = 1.0; budeId = id; }
     float rueck = sdBox(q - vec3(-0.48, 1.35, 0.0), vec3(0.04, 0.46, 1.06));
     if (rueck < d) { d = rueck; mat = 3.0; budeId = id; }
+    // das Thekenbrett, auf ihm die Waren -- je Bude eine Sorte
+    float brett = sdBox(q - vec3(-1.0, 0.92, 0.0), vec3(0.2, 0.035, 1.12));
+    if (brett < d) { d = brett; mat = 8.0; budeId = id; }
+    float sorte = mod(id, 4.0);
+    float wz = clamp(floor(q.z / 0.24 + 0.5), -4.0, 4.0);
+    vec3 wq = q - vec3(-1.02, 0.955, wz * 0.24);
+    float ware = 1e5;
+    if (sorte < 0.5) {
+        // Gluehweintassen
+        ware = max(length(wq.xz) - 0.045, abs(wq.y - 0.05) - 0.05);
+    } else if (sorte < 1.5) {
+        // Christbaumkugeln
+        ware = length(wq - vec3(0.0, 0.055, 0.0)) - 0.055;
+    } else if (sorte < 2.5) {
+        // Kerzen, verschieden hoch, jede brennt
+        float kh = 0.07 + 0.06 * hash(vec2(id, wz));
+        ware = max(length(wq.xz) - 0.028, abs(wq.y - kh) - kh);
+        float fl = length((wq - vec3(0.0, 2.0 * kh + 0.035, 0.0)) / vec3(1.0, 1.9, 1.0)) * 0.55 - 0.009;
+        if (fl < birneD) { birneD = fl; birneF = vec3(1.0, 0.65, 0.3) * (0.8 + 0.2 * sin(time * 13.0 + wz * 3.0)); }
+    } else {
+        // Lebkuchenherzen an der Traufe, sie schaukeln ein wenig
+        float hz = clamp(floor(q.z / 0.42 + 0.5), -2.0, 2.0);
+        vec3 hq = q - vec3(-1.08, 1.86, hz * 0.42);
+        float sch = 0.12 * sin(time * 1.3 + hz * 2.0 + id);
+        hq.zy = drehe(hq.zy, sch);
+        // ein Herz (Spitze unten), knapp 0.2 hoch, an der Traufe
+        vec2 h2 = vec2(abs(hq.z), (hq.y + 0.03) / 0.2 + 1.05);
+        h2.x /= 0.2;
+        float herz;
+        if (h2.y + h2.x > 1.0) herz = length(h2 - vec2(0.25, 0.75)) - 0.3536;
+        else herz = sqrt(min(dot(h2 - vec2(0.0, 1.0), h2 - vec2(0.0, 1.0)), dot(h2 - 0.5 * max(h2.x + h2.y, 0.0), h2 - 0.5 * max(h2.x + h2.y, 0.0)))) * sign(h2.x - h2.y);
+        herz = max(herz * 0.2, abs(hq.x) - 0.015);
+        if (herz < d) { d = herz; mat = 11.0; budeId = id; }
+        ware = max(length(wq.xz) - 0.045, abs(wq.y - 0.03) - 0.03);
+    }
+    if (ware < d) { d = ware; mat = 9.0; budeId = id; teilId = wz; }
+    // die Tannengirlande ueber der Theke
+    float girl = length(q.xy - vec2(-1.2, 2.24)) - 0.075 - 0.03 * rausch(vec2(q.z * 14.0, id));
+    girl = max(girl, abs(q.z) - 1.5);
+    if (girl < d) { d = girl; mat = 10.0; budeId = id; }
     // Dach: Prisma, First tangential
     vec2 n = normalize(vec2(1.0 / 1.25, 1.0 / 0.75));
     float y = q.y - 2.2;
@@ -722,7 +1110,7 @@ float szene(vec3 p) {
     // Lichterkette an der vorderen Traufe: eine Birne alle 0.3, leicht
     // durchhaengend
     float bz = clamp(floor(q.z / 0.3 + 0.5), -5.0, 5.0);
-    vec3 bp = vec3(-1.22, 2.15 - 0.06 * (1.0 - pow(bz / 5.0, 2.0)), bz * 0.3);
+    vec3 bp = vec3(-1.25, 2.12 - 0.06 * (1.0 - pow(bz / 5.0, 2.0)), bz * 0.3);
     float b = length(q - bp) - 0.03;
     if (b < birneD) {
         birneD = b;
@@ -730,6 +1118,49 @@ float szene(vec3 p) {
         birneF = wahl < 0.25 ? vec3(1.0, 0.25, 0.15) : wahl < 0.5 ? vec3(0.3, 1.0, 0.35) : wahl < 0.75 ? vec3(0.35, 0.5, 1.0) : vec3(1.0, 0.75, 0.3);
         // jede zweite blinkt im Takt
         birneF *= 0.55 + 0.45 * step(0.5, fract(takt * 2.0 + mod(bz, 2.0) * 0.5));
+    }
+
+    // Lichterketten vom Karussell zu jeder Bude, durchhaengend
+    float lx = clamp(floor((k.x - 3.6) / 0.45 + 0.5), 0.0, 14.0);
+    float ls = lx / 14.0;
+    vec3 lp = vec3(3.6 + lx * 0.45, 4.4 - 1.65 * ls - 0.4 * sin(ls * PI), 0.0);
+    float kb = length(vec3(k.x, p.y, k.y) - lp) - 0.032;
+    if (kb < birneD) {
+        birneD = kb;
+        float wahl = hash(vec2(id * 7.0, lx));
+        birneF = wahl < 0.5 ? vec3(1.0, 0.82, 0.5) : wahl < 0.7 ? vec3(1.0, 0.3, 0.2) : wahl < 0.85 ? vec3(0.35, 0.6, 1.0) : vec3(0.4, 1.0, 0.45);
+        birneF *= 0.6 + 0.4 * sin(time * 2.5 + lx * 1.3 + id * 2.0);
+    }
+
+    // --- Leute: zwei Bahnen um den Platz, dazu je Bude einer an der Theke ---
+    // (ausserhalb ihrer Bahnen zaehlt nur der Abstand zu ihnen)
+    float rp = length(p.xz);
+    float bahnen = max(abs(rp - 5.4) - 1.6, p.y - 2.0);
+    if (bahnen > 0.1) d = min(d, bahnen);
+    else {
+        for (int bahn = 0; bahn < 2; bahn++) {
+            float fb = float(bahn);
+            float R = fb < 0.5 ? 4.7 : 6.1;
+            float anz = fb < 0.5 ? 11.0 : 12.0;
+            float ri = fb < 0.5 ? 1.0 : -1.0;
+            float lauf = time * (0.55 + 0.1 * fb) / R * ri;
+            float mid;
+            vec2 mk = kreisWdh(drehe(p.xz, -lauf), anz, mid);
+            mk.y += 0.25 * sin(mid * 2.3 + fb);
+            vec3 mq = vec3(mk.x - R - 0.3 * sin(mid * 1.7), p.y, mk.y * ri);
+            if (hash(vec2(mid, fb + 2.0)) < 0.15) continue;
+            float gross = hash(vec2(mid, fb)) < 0.12 ? 0.62 : 0.88 + 0.2 * hash(vec2(mid, fb + 5.0));
+            float md = mensch(mq, gross, time * 5.5 + mid);
+            if (md < d) { d = md; mat = 7.0; teilId = menschTeil; personId = mid * 3.1 + fb * 17.0; }
+        }
+    }
+    float stehen = max(abs(rp - (RING - 1.75)) - 0.55, p.y - 2.0);
+    if (stehen > 0.1) d = min(d, stehen);
+    else {
+        vec3 mq = vec3(q.x + 1.75, p.y, q.z - 0.3 * sin(id * 2.1));
+        mq.xz = drehe(mq.xz, 1.57);
+        float md = hash(vec2(id, 9.0)) < 0.25 ? 1e5 : mensch(mq, 0.92 + 0.15 * hash(vec2(id, 4.0)), 0.0);
+        if (md < d) { d = md; mat = 7.0; teilId = menschTeil; personId = id * 5.3 + 40.0; }
     }
 
     // --- Karussell ---
@@ -744,6 +1175,10 @@ float szene(vec3 p) {
     vec2 kn = normalize(vec2(1.5, 3.2));
     float kd = dot(r - vec2(0.0, 4.7), kn);
     float kegel = max(max(kd, -kd - 0.12), 3.05 - c.y);
+    // obenauf eine goldene Krone mit Kugel
+    float krone = length(c - vec3(0.0, 4.85, 0.0)) - 0.2;
+    krone = min(krone, max(abs(length(c.xz) - 0.3) - 0.03, abs(c.y - 4.72) - 0.08 + 0.05 * sin(atan(c.z, c.x) * 8.0)));
+    if (krone < d) { d = krone; mat = 12.0; }
     // die Kante mit Bogen-Behang
     float behang = max(abs(length(c.xz) - 3.15) - 0.04, max(c.y - 3.15, 2.85 - c.y + 0.08 * abs(sin(atan(c.z, c.x) * 16.0))));
     kegel = min(kegel, behang);
@@ -854,8 +1289,8 @@ vec3 uebergang(vec3 c, vec2 uv) {
 void main() {
     vec2 uv = (fragTexCoord * resolution - 0.5 * resolution) / resolution.y;
     float w = 0.4 + fort * 1.6 + time * 0.01;
-    float abst = 8.8 - 1.5 * fort;
-    vec3 ro = vec3(cos(w) * abst, 1.9 + 0.5 * sin(fort * 3.0), sin(w) * abst);
+    float abst = 8.8 - 0.8 * fort;
+    vec3 ro = vec3(cos(w) * abst, 1.75 + 0.35 * sin(fort * 3.0), sin(w) * abst);
     vec3 ta = vec3(0.0, 2.0, 0.0);
     vec3 vorne = normalize(ta - ro);
     vec3 rechts = normalize(cross(vec3(0, 1, 0), vorne));
@@ -887,6 +1322,7 @@ void main() {
         vec3 n = normale(p);
         vec3 alb;
         vec3 eigen = vec3(0.0);
+        float glanz = 0.0;
         if (birneD < 0.005) {
             alb = vec3(0.0);
             eigen = birneF * 3.0;
@@ -912,16 +1348,80 @@ void main() {
             eigen = mix(vec3(1.0, 0.7, 0.35), waren, 0.5) * regal * 1.4;
         } else if (m < 4.5) {
             alb = vec3(0.75, 0.6, 0.3);
+            vec3 c2 = p;
+            c2.xz = drehe(c2.xz, drehung());
+            float ra = length(c2.xz);
+            if (ra < 0.32 && p.y > 0.45 && p.y < 3.9) {
+                // die Spiegelsaeule: Felder mit kleinen Lichtern
+                vec2 f = vec2(atan(c2.z, c2.x) / (2.0 * PI) * 12.0, p.y * 2.5);
+                vec2 g = fract(f) - 0.5;
+                float rahmen = step(0.42, max(abs(g.x), abs(g.y)));
+                alb = mix(vec3(0.25, 0.3, 0.4), vec3(0.8, 0.6, 0.25), rahmen);
+                float punkt = smoothstep(0.12, 0.05, length(g));
+                eigen += vec3(1.0, 0.8, 0.5) * punkt * (0.6 + 0.6 * kick) * 2.0;
+            }
+            if (p.y > 0.38 && p.y < 0.42 && ra > 2.5) eigen += vec3(1.0, 0.75, 0.4) * 0.8;
         } else if (m < 5.5) {
             vec3 c2 = p;
             c2.xz = drehe(c2.xz, drehung());
             float streifen = step(0.5, fract(atan(c2.z, c2.x) / (2.0 * PI) * 16.0));
             alb = mix(vec3(0.75, 0.06, 0.06), vec3(0.9, 0.86, 0.8), streifen);
             if (n.y > 0.5 && p.y > 3.5) alb = mix(alb, vec3(0.9, 0.92, 1.0), 0.6);
-        } else {
+        } else if (m < 6.5) {
+            // Pferde: Schimmel, Rappe, Fuchs, Apfelschimmel; Sattel rot oder blau
+            // mit Gold
             float wahl = hash(vec2(bid, 7.0));
-            alb = wahl < 0.5 ? vec3(0.9, 0.88, 0.82) : vec3(0.35, 0.18, 0.08);
-            alb += vec3(0.4, 0.3, 0.05) * step(0.85, fract(p.y * 6.0));
+            alb = wahl < 0.3 ? vec3(0.92, 0.9, 0.85) : wahl < 0.5 ? vec3(0.08, 0.07, 0.07) : wahl < 0.75 ? vec3(0.5, 0.24, 0.1) : vec3(0.75, 0.75, 0.78) * (0.75 + 0.25 * step(0.5, rausch(p.xz * 30.0 + p.y * 20.0)));
+            vec3 c2 = p;
+            c2.xz = drehe(c2.xz, drehung());
+            float hub = 0.22 * sin(takt * PI + bid * 1.7);
+            float sattel = step(abs(p.y - (1.37 + hub)), 0.025);
+            vec3 sf = hash(vec2(bid, 2.0)) < 0.5 ? vec3(0.75, 0.05, 0.08) : vec3(0.08, 0.18, 0.7);
+            alb = mix(alb, sf, sattel);
+            alb += vec3(0.5, 0.35, 0.05) * step(0.88, fract(p.y * 7.0)) * sattel;
+            glanz = 0.6;
+        } else if (m < 7.5) {
+            // Leute: Mantel in gedeckten Farben, Gesicht, bunte Muetze
+            float wahl = hash(vec2(personId, 1.0));
+            if (teilId < 0.5) {
+                alb = wahl < 0.25 ? vec3(0.35, 0.06, 0.06) : wahl < 0.5 ? vec3(0.07, 0.1, 0.25) : wahl < 0.75 ? vec3(0.08, 0.2, 0.12) : vec3(0.25, 0.16, 0.1);
+            } else if (teilId < 1.5) {
+                alb = vec3(0.85, 0.6, 0.48);
+            } else if (teilId < 2.5) {
+                float w2 = hash(vec2(personId, 2.0));
+                alb = w2 < 0.35 ? vec3(0.8, 0.08, 0.08) : w2 < 0.6 ? vec3(0.9, 0.9, 0.88) : w2 < 0.8 ? vec3(0.1, 0.35, 0.15) : vec3(0.85, 0.6, 0.1);
+            } else {
+                alb = vec3(0.05, 0.05, 0.06);
+            }
+        } else if (m < 8.5) {
+            alb = vec3(0.4, 0.24, 0.12);
+        } else if (m < 9.5) {
+            float s2 = mod(bid, 4.0);
+            float w = hash(vec2(bid, teilId));
+            if (s2 < 0.5) {
+                alb = w < 0.5 ? vec3(0.7, 0.08, 0.08) : vec3(0.1, 0.15, 0.55);
+                alb = mix(alb, vec3(0.9), step(0.8, fract((p.y + atan(p.z, p.x) * 3.0) * 25.0)) * 0.6);
+            } else if (s2 < 1.5) {
+                alb = w < 0.3 ? vec3(0.8, 0.05, 0.05) : w < 0.6 ? vec3(0.85, 0.6, 0.15) : w < 0.8 ? vec3(0.75, 0.78, 0.85) : vec3(0.1, 0.4, 0.2);
+                glanz = 1.0;
+            } else if (s2 < 2.5) {
+                alb = w < 0.5 ? vec3(0.9, 0.85, 0.7) : vec3(0.75, 0.1, 0.08);
+                eigen += vec3(1.0, 0.6, 0.3) * 0.25;
+            } else {
+                alb = vec3(0.45, 0.22, 0.08);
+            }
+        } else if (m < 10.5) {
+            alb = vec3(0.03, 0.12, 0.05) * (0.7 + 0.6 * rausch(p.xz * 20.0 + p.y * 15.0));
+            if (n.y > 0.6) alb = vec3(0.8, 0.85, 0.95);
+        } else if (m < 11.5) {
+            // Lebkuchenherz mit Zuckerguss am Rand
+            alb = vec3(0.4, 0.18, 0.06);
+            float rr2 = rausch(p.yz * 40.0);
+            alb = mix(alb, vec3(0.95, 0.9, 0.85), step(0.75, rr2) * 0.8);
+        } else {
+            alb = vec3(1.0, 0.75, 0.25);
+            glanz = 1.0;
+            eigen += vec3(1.0, 0.7, 0.3) * 0.25 * (1.0 + kick);
         }
         // Licht: Nachthimmel, das Karussell in der Mitte, die Buden ringsum
         vec3 licht = vec3(0.07, 0.08, 0.14) * (0.6 + 0.4 * n.y);
@@ -933,6 +1433,11 @@ void main() {
         // ein warmer Schimmer von den Buden hinter der Kamera
         licht += vec3(0.9, 0.6, 0.35) * max(dot(n, -rd), 0.0) * 0.22;
         c = alb * licht + eigen;
+        if (glanz > 0.0) {
+            vec3 r = reflect(rd, n);
+            c += vec3(1.0, 0.8, 0.5) * pow(max(dot(r, normalize(vec3(0.0, 2.9, 0.0) - p)), 0.0), 20.0) * glanz * 1.2;
+            c += vec3(1.0, 0.9, 0.7) * pow(max(r.y, 0.0), 30.0) * glanz * 0.4;
+        }
         c = mix(c, vec3(0.06, 0.06, 0.12), 1.0 - exp(-hit * 0.03));
     } else {
         c = himmel(rd);
@@ -952,9 +1457,13 @@ void main() {
 // Der Schlittenflug: tief ueber verschneite Huegel und Waelder, in denen hier
 // und da ein Dorf leuchtet, auf einen riesigen Mond am Horizont zu. Vor dem
 // Mond zieht der Schlitten mit seinen Rentieren vorbei -- als Schattenriss,
-// die Beine im Galopp auf dem Takt -- und hinter sich eine Spur aus Gold-
-// staub. Mit der Rueckung (`rueck`) wird die Fahrt schneller und der Himmel
-// hell vom Polarlicht.
+// die Beine im Galopp auf dem Takt, das erste Rentier mit leuchtend roter
+// Nase -- und hinter sich eine Spur aus Goldstaub. Mit der Rueckung (`rueck`)
+// steigt die Kamera durch die Wolkendecke: darueber ein Wolkenmeer im
+// Mondlicht, durch dessen Luecken die Doerfer leuchten, der Himmel hell vom
+// Polarlicht. Dort schwingt das Gespann gross von unten heran, zieht ein
+// langes Band aus Goldstaub hinter sich her und steigt zum Mond auf, dessen
+// Scheibe es am Ende klein kreuzt.
 in vec2 fragTexCoord;
 uniform sampler2D texture0;
 uniform vec2 resolution;
@@ -1013,8 +1522,11 @@ vec3 dorfLichter(vec2 p) {
     vec2 q = p - m;
     vec2 zz = floor(q / 1.6);
     vec2 f = fract(q / 1.6) - 0.5;
-    float an = step(0.55, hash(zz + z * 7.0)) * step(length(q), 6.0);
-    return vec3(1.0, 0.65, 0.3) * an * smoothstep(0.18, 0.0, length(f)) * (0.8 + 0.2 * sin(time * 2.0 + hash(zz) * 9.0));
+    float an = step(0.5, hash(zz + z * 7.0)) * step(length(q), 6.5);
+    vec3 c = vec3(1.0, 0.65, 0.3) * an * smoothstep(0.22, 0.0, length(f)) * (0.8 + 0.2 * sin(time * 2.0 + hash(zz) * 9.0));
+    // ein warmer Schein ueber dem ganzen Dorf
+    c += vec3(1.0, 0.55, 0.25) * 0.12 * smoothstep(9.0, 2.0, length(q));
+    return c;
 }
 
 float uebHash(float x) { return fract(sin(x * 91.7) * 43758.5453); }
@@ -1089,16 +1601,26 @@ float schlittenForm(vec2 p) {
     return min(min(min(kufe, kasten), min(fahrer, sack)), stuetze);
 }
 
-// Das ganze Gespann im Bild; liefert die Deckung (0..1) und in `staub` den
-// Goldstaub hinter dem Schlitten.
+vec2 drehe(vec2 p, float a) {
+    float c = cos(a), s = sin(a);
+    return vec2(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+vec2 bezier(vec2 a, vec2 b, vec2 c, vec2 d, float t) {
+    float u = 1.0 - t;
+    return u * u * u * a + 3.0 * u * u * t * b + 3.0 * u * t * t * c + t * t * t * d;
+}
+
+// Das ganze Gespann im Bild: der Kopf des ersten Rentiers bei `kopf`, Groesse
+// einer Koerperlaenge, Flugrichtung `winkel`. Liefert die Deckung (0..1), in
+// `staub` den Goldstaub dicht hinter dem Schlitten und in `nase` die Stelle
+// der roten Nase.
 float staub;
-float gespann(vec2 uv, vec2 mitte, float groesse) {
+vec2 nase;
+float gespann(vec2 uv, vec2 kopf, float groesse, float winkel) {
     staub = 0.0;
-    // die Fahrt: von links nach rechts vor dem Mond vorbei, zweimal im Kapitel
-    float lauf = fract(fort * 2.0 + 0.1);
-    vec2 kopf = mitte + vec2((-2.2 + 4.4 * lauf) * MOND_R * 1.7, MOND_R * (0.15 + 0.35 * sin(lauf * PI)));
-    kopf.y += 0.008 * sin(takt * PI * 2.0);
-    vec2 p = (uv - kopf) / groesse;
+    kopf.y += 0.15 * groesse * sin(takt * PI * 2.0);
+    vec2 p = drehe(uv - kopf, -winkel) / groesse;
+    nase = kopf + drehe(vec2(0.72, 0.26 + 0.03 * sin(takt * PI * 2.0)), winkel) * groesse;
     float d = 1e5;
     // vier Rentiere, paarweise hintereinander
     for (int i = 0; i < 4; i++) {
@@ -1148,16 +1670,25 @@ vec3 himmel(vec3 d) {
     return c;
 }
 
+// Die Wolkendecke (ab der Rueckung): eine Schicht in der Hoehe WOLKE, wie
+// dicht sie an der Stelle xz ist
+const float WOLKE = 15.0;
+float wolkenDichte(vec2 xz) {
+    return smoothstep(0.3, 0.55, fbm(xz * 0.015 + vec2(time * 0.015, 0.0)));
+}
+
 void main() {
     vec2 uv = (fragTexCoord * resolution - 0.5 * resolution) / resolution.y;
-    // Kamera: fliegt tief nach vorn, folgt den Huegeln, neigt sich in Kurven
-    float tempo = 16.0 + 10.0 * rueck;
-    float z = fort * 260.0 + time * 0.0;
+    // Kamera: fliegt tief nach vorn, folgt den Huegeln, neigt sich in Kurven;
+    // mit der Rueckung steigt sie durch die Wolken hinauf
+    float z = fort * 260.0;
     float x = 30.0 * sin(z * 0.006);
     vec3 ro = vec3(x, 0.0, z);
-    ro.y = max(gelaende(ro.xz), gelaende(ro.xz + vec2(0.0, 12.0))) + 4.5;
+    float steig = smoothstep(0.5, 0.64, fort);
+    float wolke = smoothstep(0.47, 0.55, fort);
+    ro.y = mix(max(gelaende(ro.xz), gelaende(ro.xz + vec2(0.0, 12.0))) + 4.5, 27.0 + 0.6 * sin(time * 0.7), steig);
     float neigen = -0.12 * cos(z * 0.006);
-    vec3 vorne = normalize(vec3(0.18 * cos(z * 0.006), -0.05, 1.0));
+    vec3 vorne = normalize(vec3(0.18 * cos(z * 0.006), mix(-0.05, -0.13, steig) + 0.12 * sin(steig * PI), 1.0));
     vec3 rechts = normalize(cross(vec3(sin(neigen), cos(neigen), 0.0), vorne));
     vec3 oben = cross(vorne, rechts);
     vec3 rd = normalize(vorne * 1.2 + uv.x * rechts + uv.y * oben);
@@ -1190,12 +1721,72 @@ void main() {
     } else {
         c = himmel(rd);
     }
-    // das Gespann vor dem Mond (im Bild: wo der Mond steht)
+    // die Wolkendecke: von oben im Mondlicht, durch die Luecken das Land
+    if (wolke > 0.0) {
+        float tc = (WOLKE - ro.y) / rd.y;
+        if (tc > 0.0 && (hit < 0.0 || tc < hit)) {
+            vec3 wp = ro + rd * tc;
+            float dicht = wolkenDichte(wp.xz) * wolke;
+            // Ballen: helle Kuppen, dunkle Taeler, zum Mond hin heller
+            float relief = fbm(wp.xz * 0.06 + 3.0) * 0.65 + fbm(wp.xz * 0.2 + 7.0) * 0.35;
+            float kuppe = smoothstep(0.35, 0.75, relief);
+            vec3 wf = ro.y > WOLKE
+                ? mix(vec3(0.16, 0.19, 0.3), vec3(0.85, 0.86, 0.92), kuppe) * (0.6 + 0.7 * pow(max(dot(normalize(vec3(rd.x, 0.0, rd.z)), normalize(vec3(MOND.x, 0.0, MOND.z))), 0.0), 6.0))
+                : vec3(0.12, 0.13, 0.2) * (0.6 + 0.4 * relief);
+            wf += vec3(1.0) * step(0.997, hash(floor(wp.xz * 4.0) + floor(time * 5.0))) * kuppe * 0.4;
+            // das Polarlicht faerbt die Wolken
+            wf += vec3(0.1, 0.5, 0.3) * rueck * 0.25 * relief;
+            dicht *= 1.0 - smoothstep(120.0, 260.0, tc);
+            c = mix(c, wf, dicht);
+        }
+        // mitten durch die Decke: alles im Nebel
+        float drin = exp(-abs(ro.y - WOLKE) * 0.45) * wolke;
+        c = mix(c, vec3(0.5, 0.54, 0.66), drin * 0.9);
+    }
+    // das Gespann: erst einmal klein vor dem Mond vorbei, nach der Rueckung
+    // ueber den Wolken gross von unten heran und hinauf zum Mond
     vec3 mr = vec3(dot(MOND, rechts), dot(MOND, oben), dot(MOND, vorne));
     vec2 mitte = mr.xy / mr.z * 1.2;
-    float sil = gespann(uv, mitte, 0.055);
-    c = mix(c, vec3(0.01, 0.01, 0.02), sil * step(hit, 0.0));
-    c += vec3(1.0, 0.78, 0.35) * staub * (0.7 + 0.8 * ton) * step(hit, 0.0);
+    float laufA = clamp(fort / 0.46, 0.0, 1.0);
+    float laufB = clamp((fort - 0.6) / 0.38, 0.0, 1.0);
+    float sil = 0.0;
+    float band = 0.0;
+    float vorn = 0.0;
+    if (fort < 0.47) {
+        vec2 kopf = mitte + vec2((-2.2 + 4.4 * laufA) * MOND_R * 1.7, MOND_R * (0.15 + 0.35 * sin(laufA * PI)));
+        sil = gespann(uv, kopf, 0.055, 0.0) * step(hit, 0.0);
+    } else if (fort > 0.6) {
+        vec2 a = vec2(-1.35, -0.3), b = vec2(-0.45, -0.46), cc = mitte + vec2(-0.75, -0.2), d = mitte + vec2(0.45, 0.08);
+        vec2 kopf = bezier(a, b, cc, d, laufB);
+        vec2 r = bezier(a, b, cc, d, min(laufB + 0.01, 1.0)) - bezier(a, b, cc, d, max(laufB - 0.01, 0.0));
+        float gr = mix(0.26, 0.02, pow(laufB, 0.7));
+        sil = gespann(uv, kopf, gr, atan(r.y, r.x));
+        vorn = 1.0;
+        // das Band aus Goldstaub: der Weg, den der Schlitten genommen hat
+        for (int k = 1; k < 56; k++) {
+            float fk = float(k);
+            float sk = laufB - fk * 0.009;
+            if (sk < 0.0) break;
+            vec2 rk = bezier(a, b, cc, d, sk + 0.005) - bezier(a, b, cc, d, sk - 0.005);
+            float gk = mix(0.26, 0.02, pow(sk, 0.7));
+            vec2 hinten = bezier(a, b, cc, d, sk) + drehe(vec2(-5.9, -0.32), atan(rk.y, rk.x)) * gk;
+            float alter = fk / 56.0;
+            hinten += vec2(hash(vec2(fk, 3.0)) - 0.5, hash(vec2(fk, 4.0)) - 0.5) * gk * 1.5 * alter;
+            hinten.y -= alter * alter * 0.05;
+            float rr = length(uv - hinten) / (gk * 0.35 + 0.002);
+            float funkeln = 0.55 + 0.45 * sin(time * 11.0 + fk * 2.7);
+            band += (exp(-rr * rr * 3.0) * 1.2 + exp(-rr * 1.6) * 0.15) * (1.0 - alter) * funkeln;
+        }
+    }
+    c = mix(c, vec3(0.01, 0.01, 0.02), sil);
+    c += vec3(1.0, 0.78, 0.35) * (staub * step(hit, 0.0) * (1.0 - vorn) + staub * vorn + band) * (0.7 + 0.8 * ton);
+    // die rote Nase des ersten Rentiers
+    if (fort < 0.47 || fort > 0.6) {
+        float gn = fort < 0.47 ? 0.055 : mix(0.26, 0.02, pow(laufB, 0.7));
+        float rn = length(uv - nase) / gn;
+        float sichtbar = fort < 0.47 ? step(hit, 0.0) : 1.0;
+        c += vec3(1.0, 0.12, 0.06) * (exp(-rn * rn * 120.0) * 3.0 + exp(-rn * 5.0) * 0.35) * (0.8 + 0.4 * kick) * sichtbar;
+    }
     c *= 1.0 + 0.1 * kick;
     c *= 1.0 - 0.3 * dot(uv * 0.9, uv * 0.9);
     c += (hash(fragTexCoord * resolution + time) - 0.5) * 0.012;
@@ -1208,10 +1799,13 @@ void main() {
 #version 330
 // Heiligabend: erst von draussen vor dem Fenster (Schnee auf der Bank, Eis-
 // blumen in den Ecken der Scheiben), dann hindurch in die Stube. Dort brennt
-// der Kamin, unter dem Baum liegen Geschenke, eine Lichterkette windet sich
-// um die Tanne. Der Baum schmueckt sich zu "Stille Nacht": `kugeln` zaehlt
-// die Kugeln (je Ton eine, von oben nach unten, die juengste geht gerade
-// auf). Gegen Mitternacht wird es dunkler (`nacht`), jede Glocke (`glocke`)
+// der Kamin, unter dem Baum liegen Geschenke, an der Rueckwand tickt eine
+// Uhr ueber einer Kommode mit Schwibbogen. Der Baum entfaltet seine Lagen
+// von oben nach unten (`aufbau`), die Lichterkette geht von unten nach oben
+// an (`kette`), dann schmueckt er sich zu "Stille Nacht": `kugeln` zaehlt
+// die Kugeln (je Ton eine, ueber den Baum gestreut, die juengste geht gerade
+// auf). Die Uhr geht auf Mitternacht zu. Gegen Mitternacht wird es dunkler
+// (`nacht`), jede Glocke (`glocke`)
 // schickt einen Lichtring von der Spitze aus, und mit `stern` geht der Stern
 // auf der Spitze auf.
 in vec2 fragTexCoord;
@@ -1222,6 +1816,8 @@ uniform float takt;
 uniform float hell;
 uniform float fort;
 uniform float kugeln;
+uniform float aufbau;
+uniform float kette;
 uniform float glocke;
 uniform float stern;
 uniform float nacht;
@@ -1248,8 +1844,6 @@ const float PI = 3.14159265;
 const vec3 BAUM = vec3(1.0, 0.0, 5.2);
 const float SPITZE = 3.05;
 const float WAND_Z = -2.0;
-const float EBENEN = 12.0;   // Kugeln: zwoelf Ebenen zu je acht
-const float JE_EBENE = 8.0;
 
 float sdBox(vec3 p, vec3 b) {
     vec3 q = abs(p) - b;
@@ -1267,39 +1861,92 @@ float sdKegel(vec3 p, vec2 c, float h) {
     return sqrt(d) * sign(s);
 }
 
-// Radius der Huelle des Baums in der Hoehe y
-float baumRadius(float y) { return max(0.0, 1.32 * (SPITZE - y) / (SPITZE - 0.3)); }
-
-// Die Kugeln: die Hoehe teilt der Baum in Ebenen, den Umfang in Sektoren;
-// je Zelle eine Kugel auf der Huelle. Ihre Nummer zaehlt von oben nach unten,
-// innerhalb der Ebene in einer festen, gewuerfelten Reihenfolge.
-float kugelNr;
-float kugel(vec3 p) {
-    vec3 q = p - BAUM;
-    float dy = (SPITZE - 0.55) / EBENEN;
-    float ebene = clamp(floor((SPITZE - 0.35 - q.y) / dy), 0.0, EBENEN - 1.0);
-    float yc = SPITZE - 0.35 - (ebene + 0.5) * dy;
-    float versatz = ebene * 0.7;
-    float a = atan(q.z, q.x) - versatz;
-    float sek = 2.0 * PI / JE_EBENE;
-    float s = floor(mod(a, 2.0 * PI) / sek);
-    float ac = (s + 0.5) * sek + versatz;
-    float r = baumRadius(yc) * 0.9 + 0.08;
-    vec3 c = vec3(cos(ac) * r, yc - 0.05 * hash(vec2(ebene, s)), sin(ac) * r);
-    // Reihenfolge in der Ebene: gewuerfelt, aber fest
-    float rang = mod(s * 5.0 + ebene * 3.0, JE_EBENE);
-    kugelNr = ebene * JE_EBENE + rang;
-    float auf = clamp(kugeln - kugelNr, 0.0, 1.0);
-    // die juengste waechst mit einem kleinen Ueberschwingen
-    float gr = auf < 1.0 ? auf * (1.0 + 0.6 * sin(auf * PI)) : 1.0;
-    float rad = (0.058 + 0.02 * hash(vec2(s, ebene + 3.0))) * gr;
-    if (rad <= 0.001) return 1e5;
-    return length(q - c) - rad;
+// Der Baum sind fuenf Lagen Tanne (Kegel), jede ueberdeckt die obere Haelfte
+// der Lage darunter. Radius der Aussenkante in der Hoehe y (ueber dem Fuss):
+// die breiteste Lage, die dort liegt -- ein Saegezahn, keine gerade Huelle.
+float lageSpitze(float i) { return 1.05 + i * 0.5; }
+// Wie weit die Lage i aufgegangen ist: anfangs liegen die Zweige wie ein
+// zugeklappter Schirm am Stamm, dann oeffnen sie sich von der Spitze abwaerts
+// und federn ein wenig nach.
+float lageAuf(float i) {
+    float x = clamp((aufbau - (4.0 - i) * 0.14) / 0.42, 0.0, 1.0);
+    return 0.12 + 0.88 * (x * x * (3.0 - 2.0 * x) + 0.18 * sin(x * PI) * x);
+}
+float lageRadius(float i) { return (1.32 - i * 0.21) * lageAuf(i); }
+float huelle(float y) {
+    float r = 0.0;
+    for (int i = 0; i < 5; i++) {
+        float u = (lageSpitze(float(i)) - y) / 0.95;
+        if (u >= 0.0 && u <= 1.0) r = max(r, lageRadius(float(i)) * u);
+    }
+    return r;
 }
 
-// Die Lichterkette: eine Schraube um den Baum, eine Birne je Achtel Umlauf
+// Die Kugeln haengen in Reihen: je Lage eine am unteren Rand der Zweige und
+// eine in der Mitte des sichtbaren Bandes, dazu drei an der Spitze -- 92,
+// eine je Ton von "Stille Nacht". Sie sitzen auf der Seite, die die Kamera
+// sieht (ein Bogen von 200 Grad), die Zahl je Reihe folgt dem Umfang. Die
+// Nummer streut ueber den ganzen Baum (g * 37 mod 92), so fuellt er sich
+// gleichmaessig statt von oben nach unten.
+const float RY[11] = float[11](0.17, 0.39, 0.67, 0.89, 1.17, 1.39, 1.67, 1.89, 2.17, 2.39, 2.65);
+const float RR[11] = float[11](1.222, 0.917, 1.028, 0.771, 0.834, 0.626, 0.639, 0.480, 0.444, 0.334, 0.202);
+const float RN[11] = float[11](15.0, 11.0, 13.0, 9.0, 10.0, 8.0, 8.0, 6.0, 5.0, 4.0, 3.0);
+const float RO[11] = float[11](0.0, 15.0, 26.0, 39.0, 48.0, 58.0, 66.0, 74.0, 80.0, 85.0, 89.0);
+const float VORNE = -1.85;      // die Richtung vom Baum zur Kamera (Winkel in xz)
+const float BOGEN = 1.75;       // halbe Breite des behaengten Bogens
+const float KUGELN_ALLE = 92.0;
+
+// Winkel a auf den Bogen gelegt: 0 .. 2 BOGEN, ausserhalb ans naechste Ende
+float aufBogen(float a) {
+    float rel = mod(a - (VORNE - BOGEN), 2.0 * PI);
+    if (rel > 2.0 * BOGEN) rel = rel > BOGEN + PI ? 0.0 : 2.0 * BOGEN - 0.001;
+    return rel;
+}
+
+float kugelNr;
+float kugelReihe(vec3 q, float rel, int k, inout float nr, float best) {
+    float n = RN[k];
+    float w = 2.0 * BOGEN / n;
+    float s = clamp(floor(rel / w), 0.0, n - 1.0);
+    float g = RO[k] + s;
+    float ac = VORNE - BOGEN + (s + 0.5 + 0.3 * (hash(vec2(g, 7.0)) - 0.5)) * w;
+    // die Reihe gehoert zu einer Lage und geht mit ihr auf
+    float e = lageAuf(float(min(k / 2, 4)));
+    float r = RR[k] * e + 0.035;
+    vec3 c = vec3(cos(ac) * r, RY[k] - 0.03 * hash(vec2(g, 9.0)), sin(ac) * r);
+    float nummer = mod(g * 37.0, KUGELN_ALLE);
+    float auf = clamp(kugeln - nummer, 0.0, 1.0);
+    // die juengste waechst mit einem kleinen Ueberschwingen
+    float gr = auf < 1.0 ? auf * (1.0 + 0.6 * sin(auf * PI)) : 1.0;
+    gr *= smoothstep(0.55, 0.92, e);
+    float rad = (0.062 + 0.02 * hash(vec2(g, 3.0))) * gr;
+    if (rad <= 0.001) return best;
+    float d = length(q - c) - rad;
+    if (d < best) { nr = nummer; return d; }
+    return best;
+}
+
+// Die naechste Kugel: aus den zwei Reihen, zwischen denen p liegt -- nicht
+// nur aus der eigenen Zelle (sonst schneidet die Zellgrenze die Kugel ab)
+float kugel(vec3 p) {
+    vec3 q = p - BAUM;
+    int k = 0;
+    for (int i = 0; i < 10; i++) {
+        if (q.y > (RY[i] + RY[i + 1]) * 0.5) k = i + 1;
+    }
+    int k2 = q.y > RY[k] ? min(k + 1, 10) : max(k - 1, 0);
+    float rel = aufBogen(atan(q.z, q.x));
+    float best = 1e5;
+    best = kugelReihe(q, rel, k, kugelNr, best);
+    if (k2 != k) best = kugelReihe(q, rel, k2, kugelNr, best);
+    return best;
+}
+
+// Die Lichterkette: eine Schraube um den Baum, zehn Birnen je Umlauf, jede
+// auf der Aussenkante der Zweige in ihrer Hoehe
 float birneD;
 float birneId;
+float birneAn;
 float lichterkette(vec3 p) {
     vec3 q = p - BAUM;
     float windungen = 5.0;
@@ -1313,17 +1960,118 @@ float lichterkette(vec3 p) {
         float kk = k + float(j);
         float aq = (floor(a / (2.0 * PI) * 10.0) + 0.5) / 10.0 * 2.0 * PI;
         float y = SPITZE - 0.1 - (aq / (2.0 * PI) + kk) * schritt;
-        if (y < 0.35 || y > SPITZE - 0.15) continue;
-        float r = baumRadius(y) * 0.93 + 0.04;
+        if (y < 0.2 || y > SPITZE - 0.15) continue;
+        float r = huelle(y) + 0.03;
         vec3 c = vec3(cos(aq - PI) * r, y, sin(aq - PI) * r);
         float d = length(q - c) - 0.028;
-        if (d < best) { best = d; birneId = kk * 10.0 + floor(a / (2.0 * PI) * 10.0); }
+        if (d < best) {
+            best = d;
+            birneId = kk * 10.0 + floor(a / (2.0 * PI) * 10.0);
+            // das Licht laeuft die Kette von unten nach oben hinauf
+            float u = (y - 0.2) / (SPITZE - 0.35);
+            birneAn = smoothstep(u, u + 0.05, kette * 1.06);
+        }
     }
     return best;
 }
 
+// Die Geschenke: fuenf auf einem Bogen vor dem Baum, zur Kamera hin, jedes
+// etwas gedreht -- keins steckt in den Zweigen
+const float GESCHENKE = 5.0;
+vec3 geschenkOrt(float i) {
+    float w = VORNE + (i - 2.0) * 0.42 + 0.08 * sin(i * 3.1);
+    float r = 1.5 + 0.18 * hash(vec2(i, 5.0));
+    return BAUM + vec3(cos(w) * r, 0.0, sin(w) * r);
+}
+vec3 geschenkMass(float i) {
+    return vec3(0.15 + 0.08 * hash(vec2(i, 1.0)), 0.1 + 0.1 * hash(vec2(i, 2.0)), 0.15 + 0.06 * hash(vec2(i, 6.0)));
+}
+// p in die Lage des Geschenks i (Mitte des Bodens, gedreht)
+vec3 geschenkLokal(vec3 p, float i) {
+    vec3 l = p - geschenkOrt(i);
+    float w = hash(vec2(i, 8.0)) * 1.2 - 0.6;
+    float c = cos(w), s = sin(w);
+    return vec3(c * l.x - s * l.z, l.y, s * l.x + c * l.z);
+}
+
+// Das Fenster oeffnet sich nach innen, bevor die Kamera hindurchfaehrt: zwei
+// Fluegel, je an der Aussenkante angeschlagen (frueher fuhr sie mitten durch
+// die Sprosse).
+float oeffnen() { return smoothstep(0.075, 0.15, fort); }
+float fluegel(vec3 p) {
+    // beide Fluegel aus einem: x gespiegelt, Angel bei x = 0.97
+    vec3 q = vec3(abs(p.x), p.y, p.z) - vec3(0.97, 1.55, WAND_Z - 0.05);
+    float phi = oeffnen() * 1.45;
+    float c = cos(phi), s = sin(phi);
+    vec3 l = vec3(c * q.x - s * q.z, q.y, s * q.x + c * q.z);
+    l.x += 0.485;
+    float d = max(sdBox(l, vec3(0.485, 0.77, 0.03)), -sdBox(l, vec3(0.445, 0.73, 0.1)));
+    d = min(d, sdBox(l - vec3(0.0, 0.12, 0.0), vec3(0.485, 0.03, 0.025)));
+    return d;
+}
+
+// An der Rueckwand links vom Baum: eine Kommode, darauf ein Schwibbogen mit
+// sieben Kerzen und einem ausgesaegten Dorf, darueber eine Wanduhr, deren
+// Pendel auf jedem Schlag ausschlaegt.
+const vec3 KOMMODE = vec3(-1.6, 0.0, 7.7);
+const vec3 UHR = vec3(-1.6, 2.2, 7.92);
+float sdDreieck(vec2 p, vec2 q) {
+    // gleichschenklig, Spitze im Ursprung, Grundseite bei y = q.y (< 0)
+    p.x = abs(p.x);
+    vec2 a = p - q * clamp(dot(p, q) / dot(q, q), 0.0, 1.0);
+    vec2 b = p - q * vec2(clamp(p.x / q.x, 0.0, 1.0), 1.0);
+    float s = -sign(q.y);
+    vec2 d = min(vec2(dot(a, a), s * (p.x * q.y - p.y * q.x)), vec2(dot(b, b), s * (p.y - q.y)));
+    return -sqrt(d.x) * sign(d.y);
+}
+float pendelWinkel() { return 0.16 * sin(takt * 4.0 * PI); }
+float flammeD;
+float moebel(vec3 p, inout float m) {
+    float d = 1e5;
+    flammeD = 1e5;
+    // Kommode mit Deckplatte
+    vec3 k = p - KOMMODE;
+    float kom = sdBox(k - vec3(0.0, 0.4, 0.0), vec3(0.72, 0.4, 0.28)) - 0.01;
+    kom = min(kom, sdBox(k - vec3(0.0, 0.81, -0.01), vec3(0.76, 0.015, 0.3)));
+    if (kom < d) { d = kom; m = 11.0; }
+    // der Schwibbogen: ein halber Ring auf einer Leiste
+    vec3 q = p - vec3(KOMMODE.x, 0.84, KOMMODE.z + 0.02);
+    float bogen = max(length(vec2(length(q.xy) - 0.42, q.z)) - 0.02, -q.y);
+    bogen = min(bogen, sdBox(q - vec3(0.0, 0.012, 0.0), vec3(0.46, 0.014, 0.04)));
+    // darin ausgesaegt: Kirche und Tannen als Schattenriss
+    float riss = sdBox(vec3(q.xy - vec2(0.0, 0.07), 0.0), vec3(0.07, 0.06, 1.0));
+    riss = min(riss, sdDreieck(q.xy - vec2(0.0, 0.2), vec2(0.085, -0.07)));
+    riss = min(riss, sdBox(vec3(q.xy - vec2(0.0, 0.2), 0.0), vec3(0.02, 0.07, 1.0)));
+    riss = min(riss, sdDreieck(q.xy - vec2(0.0, 0.33), vec2(0.03, -0.07)));
+    riss = min(riss, sdDreieck(vec2(abs(q.x) - 0.2, q.y - 0.24), vec2(0.07, -0.23)));
+    riss = min(riss, sdDreieck(vec2(abs(q.x) - 0.31, q.y - 0.16), vec2(0.05, -0.15)));
+    bogen = min(bogen, max(riss, abs(q.z) - 0.006));
+    if (bogen < d) { d = bogen; m = 11.0; }
+    // sieben Kerzen auf dem Bogen: die naechste aus dem Winkel
+    float w = clamp(floor(atan(max(q.y, 0.0), q.x) / (PI / 8.0) + 0.5), 1.0, 7.0) * PI / 8.0;
+    vec3 kq = q - vec3(cos(w) * 0.42, sin(w) * 0.42 + 0.02, 0.0);
+    float kerze = max(length(kq.xz) - 0.011, abs(kq.y - 0.035) - 0.035);
+    if (kerze < d) { d = kerze; m = 14.0; }
+    flammeD = length((kq - vec3(0.0, 0.085, 0.0)) / vec3(1.0, 1.8, 1.0)) * 0.55 - 0.007;
+    // die Wanduhr: Gehaeuse, Zifferblatt, Pendel
+    vec3 u = p - UHR;
+    float geh = sdBox(u - vec3(0.0, -0.25, 0.0), vec3(0.24, 0.55, 0.08)) - 0.01;
+    geh = min(geh, max(sdDreieck(u.xy - vec2(0.0, 0.47), vec2(0.3, -0.16)), abs(u.z) - 0.07));
+    if (geh < d) { d = geh; m = 11.0; }
+    float blatt = max(length(u.xy) - 0.19, abs(u.z + 0.09) - 0.012);
+    if (blatt < d) { d = blatt; m = 12.0; }
+    vec2 ende = vec2(sin(pendelWinkel()), -cos(pendelWinkel())) * 0.42;
+    vec2 pa = u.xy - vec2(0.0, -0.27);
+    float h = clamp(dot(pa, ende) / dot(ende, ende), 0.0, 1.0);
+    float pendel = max(length(pa - ende * h) - 0.008, abs(u.z + 0.1) - 0.005);
+    pendel = min(pendel, max(length(pa - ende) - 0.055, abs(u.z + 0.1) - 0.01));
+    if (pendel < d) { d = pendel; m = 13.0; }
+    return d;
+}
+
 // Material: 0 Boden, 1 Wand, 2 Decke, 3 Baum, 4 Stamm, 5 Kugel, 6 Geschenk,
-// 7 Kamin, 8 Fensterrahmen, 9 Schnee aussen, 10 Teppich
+// 7 Kamin, 8 Fensterrahmen, 9 Schnee aussen, 10 Teppich, 11 dunkles Holz,
+// 12 Zifferblatt, 13 Messing, 14 Kerzenwachs
 float mat;
 float geschenkId;
 float szene(vec3 p) {
@@ -1336,11 +2084,10 @@ float szene(vec3 p) {
     raum = max(raum, -loch);
     float d = raum;
     mat = p.y < 0.01 && p.z > WAND_Z ? 0.0 : (p.y > 3.19 ? 2.0 : 1.0);
-    // Fensterrahmen und Sprossen in der Scheibenebene
+    // Fensterrahmen in der Scheibenebene, die Fluegel darin
     vec3 f = p - vec3(0.0, 1.55, WAND_Z - 0.05);
     float rahmen = max(sdBox(f, vec3(1.05, 0.85, 0.05)), -sdBox(f, vec3(0.97, 0.77, 0.1)));
-    rahmen = min(rahmen, sdBox(f, vec3(0.035, 0.85, 0.04)));
-    rahmen = min(rahmen, sdBox(f - vec3(0.0, 0.12, 0.0), vec3(1.05, 0.035, 0.04)));
+    rahmen = min(rahmen, fluegel(p));
     if (rahmen < d) { d = rahmen; mat = 8.0; }
     // aussen: Schnee auf der Fensterbank und am Boden vor dem Haus
     float bank = sdBox(p - vec3(0.0, 0.66, WAND_Z - 0.42), vec3(1.2, 0.04, 0.14)) - 0.03 - 0.02 * rausch(p.xz * 9.0);
@@ -1351,14 +2098,15 @@ float szene(vec3 p) {
     float teppich = max(length((p.xz - vec2(0.3, 4.2)) / vec2(2.0, 1.4)) - 1.0, p.y - 0.012);
     if (teppich < d) { d = teppich; mat = 10.0; }
     // der Baum: fuenf Lagen Tanne
+    // (ausserhalb der Huelle zaehlt nur der Abstand zu ihr: so tritt der Strahl
+    // nie ueber Zweige hinweg und meldet doch keinen Treffer an der Huelle)
     vec3 q = p - BAUM;
-    if (length(q.xz) < 1.6 && q.y < SPITZE + 0.2) {
+    float baumHuelle = max(length(q.xz) - 1.6, q.y - SPITZE - 0.2);
+    if (baumHuelle < 0.1) {
         float tanne = 1e5;
         for (int i = 0; i < 5; i++) {
             float fi = float(i);
-            float spitze = 1.05 + fi * 0.5;
-            float r = 1.32 - fi * 0.21;
-            float k = sdKegel(q - vec3(0.0, spitze + (i == 4 ? 0.0 : 0.0), 0.0), normalize(vec2(r, 0.95)), 0.95);
+            float k = sdKegel(q - vec3(0.0, lageSpitze(fi), 0.0), normalize(vec2(lageRadius(fi), 0.95)), 0.95);
             tanne = min(tanne, k);
         }
         // Zweige: zerzauster Rand
@@ -1370,17 +2118,37 @@ float szene(vec3 p) {
         float kg = kugel(p);
         if (kg < d) { d = kg; mat = 5.0; }
         birneD = lichterkette(p);
-        d = min(d, birneD + 0.01);
     } else {
         birneD = 1e5;
+        birneAn = 0.0;
+        d = min(d, baumHuelle);
     }
-    // Geschenke unter dem Baum
-    for (int i = 0; i < 4; i++) {
-        float fi = float(i);
-        vec3 gp = BAUM + vec3(-1.1 + fi * 0.7, 0.0, -1.0 + 0.35 * sin(fi * 2.0));
-        vec3 gg = vec3(0.17 + 0.06 * hash(vec2(fi, 1.0)), 0.13 + 0.08 * hash(vec2(fi, 2.0)), 0.18);
-        float gs = sdBox(p - gp - vec3(0.0, gg.y, 0.0), gg) - 0.01;
-        if (gs < d) { d = gs; mat = 6.0; geschenkId = fi; }
+    // Kommode, Schwibbogen und Uhr (nur in ihrer Naehe gerechnet)
+    float mHuelle = max(abs(p.x - KOMMODE.x) - 0.95, max(KOMMODE.z - 0.45 - p.z, p.y - 2.85));
+    if (mHuelle < 0.1) {
+        float mm = mat;
+        float md = moebel(p, mm);
+        if (md < d) { d = md; mat = mm; }
+        if (flammeD < birneD) { birneD = flammeD; birneId = 99.0; birneAn = 1.0; }
+    } else {
+        d = min(d, mHuelle);
+    }
+    d = min(d, birneD + 0.01);
+    // Geschenke vor dem Baum, mit einer Schleife obenauf
+    float gHuelle = max(length(p.xz - (BAUM.xz + vec2(cos(VORNE), sin(VORNE)) * 1.55)) - 1.7, p.y - 0.6);
+    if (gHuelle < 0.1) {
+        for (int i = 0; i < 5; i++) {
+            float fi = float(i);
+            vec3 l = geschenkLokal(p, fi);
+            vec3 gg = geschenkMass(fi);
+            float gs = sdBox(l - vec3(0.0, gg.y, 0.0), gg) - 0.01;
+            vec3 sl = l - vec3(0.0, 2.0 * gg.y + 0.025, 0.0);
+            sl.x = abs(sl.x) - 0.04;
+            gs = min(gs, (length(sl / vec3(1.0, 0.55, 0.45)) - 0.045) * 0.45);
+            if (gs < d) { d = gs; mat = 6.0; geschenkId = fi; }
+        }
+    } else {
+        d = min(d, gHuelle);
     }
     // der Kamin an der linken Wand
     vec3 kp = p - vec3(-3.7, 0.0, 3.5);
@@ -1389,6 +2157,20 @@ float szene(vec3 p) {
     kamin = min(kamin, sdBox(kp - vec3(0.05, 1.55, 0.0), vec3(0.45, 0.06, 1.1)));
     if (kamin < d) { d = kamin; mat = 7.0; }
     return d;
+}
+
+// Ein Stern mit fuenf Zacken (2D, Spitze nach oben), r aussen, rf innen/aussen
+float sdStern5(vec2 p, float r, float rf) {
+    const vec2 k1 = vec2(0.809016994375, -0.587785252292);
+    const vec2 k2 = vec2(-0.809016994375, -0.587785252292);
+    p.x = abs(p.x);
+    p -= 2.0 * max(dot(k1, p), 0.0) * k1;
+    p -= 2.0 * max(dot(k2, p), 0.0) * k2;
+    p.x = abs(p.x);
+    p.y -= r;
+    vec2 ba = rf * vec2(-k1.y, k1.x) - vec2(0.0, 1.0);
+    float h = clamp(dot(p, ba) / dot(ba, ba), 0.0, r);
+    return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
 }
 
 vec3 normale(vec3 p) {
@@ -1452,9 +2234,10 @@ void main() {
     float f1 = smoothstep(0.0, 0.3, fort);
     float f2 = smoothstep(0.25, 1.0, fort);
     vec3 ro = mix(vec3(0.0, 1.5, WAND_Z - 2.6), vec3(0.0, 1.55, WAND_Z + 0.6), f1);
-    ro = mix(ro, vec3(-0.6, 1.55, 1.2), f2);
-    vec3 ta = mix(vec3(0.3, 1.45, 5.0), BAUM + vec3(0.0, 1.5, 0.0), f2);
-    ta.y += stern * 0.7 + 0.2 * smoothstep(0.85, 0.95, fort);
+    // (so weit vom Baum, dass Geschenke und Stern im Bild bleiben)
+    ro = mix(ro, vec3(-0.7, 1.6, 0.5), f2);
+    vec3 ta = mix(vec3(0.3, 1.45, 5.0), BAUM + vec3(0.0, 1.55, 0.0), f2);
+    ta.y += stern * 0.35 + 0.1 * smoothstep(0.85, 0.95, fort);
     vec3 vorne = normalize(ta - ro);
     vec3 rechts = normalize(cross(vec3(0, 1, 0), vorne));
     vec3 oben = cross(vorne, rechts);
@@ -1473,7 +2256,7 @@ void main() {
         vec3 p = ro + rd * t;
         float d = szene(p);
         float bd = max(birneD, 0.0);
-        glimmen += vec3(1.0, 0.78, 0.45) * 0.0016 / (0.0003 + bd * bd) * min(d, 0.2) * (0.7 + 0.3 * sin(time * 3.0 + birneId * 1.7));
+        glimmen += vec3(1.0, 0.78, 0.45) * 0.0016 / (0.0003 + bd * bd) * min(d, 0.2) * (0.7 + 0.3 * sin(time * 3.0 + birneId * 1.7)) * birneAn;
         if (d < 0.001 * t + 0.0005) { hit = t; break; }
         t += d * 0.8;
         if (t > 30.0) break;
@@ -1489,8 +2272,8 @@ void main() {
         vec3 eigen = vec3(0.0);
         float glanz = 0.0;
         if (birneD < 0.004) {
-            alb = vec3(0.0);
-            eigen = vec3(1.0, 0.8, 0.5) * 3.0;
+            alb = vec3(0.05, 0.05, 0.04);
+            eigen = vec3(1.0, 0.8, 0.5) * 3.0 * birneAn;
         } else if (m < 0.5) {
             // Dielen
             float diele = fract(p.x * 2.2);
@@ -1501,6 +2284,13 @@ void main() {
             // Tapete mit kleinem Muster; aussen weisser Putz
             if (p.z < WAND_Z - 0.2) {
                 alb = vec3(0.7, 0.66, 0.6);
+            } else if (p.y < 0.95) {
+                // unten eine Holzvertaefelung mit Feldern und Abschlussleiste
+                vec2 tp = vec2(p.x + p.z, p.y);
+                float feld = smoothstep(0.0, 0.02, abs(fract(tp.x * 1.4) - 0.5) - 0.44) + smoothstep(0.0, 0.02, abs(tp.y - 0.47) - 0.38);
+                alb = vec3(0.26, 0.13, 0.06) * (0.8 + 0.2 * rausch(vec2(tp.x * 3.0, tp.y * 40.0)));
+                alb *= 1.0 - 0.3 * clamp(feld, 0.0, 1.0);
+                alb = mix(alb, vec3(0.33, 0.18, 0.08), step(0.9, p.y));
             } else {
                 vec2 tp = vec2(p.x + p.z, p.y) * 5.0;
                 float muster = smoothstep(0.12, 0.08, length(fract(tp) - 0.5));
@@ -1523,8 +2313,8 @@ void main() {
         } else if (m < 6.5) {
             float wahl = gid;
             vec3 papier = wahl < 0.5 ? vec3(0.7, 0.05, 0.05) : wahl < 1.5 ? vec3(0.1, 0.3, 0.6) : wahl < 2.5 ? vec3(0.8, 0.65, 0.2) : vec3(0.1, 0.45, 0.2);
-            vec3 gp = p - (BAUM + vec3(-1.1 + gid * 0.7, 0.0, -1.0 + 0.35 * sin(gid * 2.0)));
-            float band = step(abs(gp.x), 0.025) + step(abs(gp.z), 0.025);
+            vec3 gp = geschenkLokal(p, gid);
+            float band = step(abs(gp.x), 0.025) + step(abs(gp.z), 0.025) + step(2.0 * geschenkMass(gid).y + 0.005, gp.y);
             alb = mix(papier, vec3(0.9, 0.8, 0.5), clamp(band, 0.0, 1.0));
         } else if (m < 7.5) {
             alb = vec3(0.45, 0.2, 0.15) * (0.8 + 0.2 * step(0.5, fract(p.y * 6.0 + step(0.5, fract(p.z * 3.0)) * 0.5)));
@@ -1532,8 +2322,39 @@ void main() {
             alb = vec3(0.12, 0.06, 0.03);
         } else if (m < 9.5) {
             alb = vec3(0.8, 0.85, 0.95);
-        } else {
+        } else if (m < 10.5) {
             alb = vec3(0.45, 0.06, 0.06) * (0.8 + 0.2 * sin(length(p.xz - vec2(0.3, 4.2)) * 30.0));
+        } else if (m < 11.5) {
+            alb = vec3(0.2, 0.1, 0.05) * (0.85 + 0.15 * rausch(vec2(p.x * 30.0, p.y * 4.0)));
+            glanz = 0.15;
+        } else if (m < 12.5) {
+            // das Zifferblatt: Striche fuer die Stunden, zwei Zeiger. Die Uhr
+            // geht von zehn vor zwoelf auf Mitternacht, zu jedem Glockenschlag
+            // leuchtet das Blatt auf.
+            vec2 z = p.xy - UHR.xy;
+            float r = length(z);
+            float wz = atan(z.x, z.y);
+            float stunde = abs(mod(wz + PI / 12.0, PI / 6.0) - PI / 12.0) * r;
+            float striche = (1.0 - smoothstep(0.004, 0.007, stunde)) * step(0.14, r) * step(r, 0.175);
+            float minuten = 50.0 + 10.0 * clamp((takt - 78.0) / 18.0, 0.0, 1.0);
+            float wm = minuten / 60.0 * 2.0 * PI;
+            float wh = (11.0 + minuten / 60.0) / 12.0 * 2.0 * PI;
+            vec2 em = vec2(sin(wm), cos(wm));
+            vec2 eh = vec2(sin(wh), cos(wh));
+            float zm = abs(z.x * em.y - z.y * em.x) - 0.004;
+            zm = max(zm, max(-dot(z, em) - 0.02, dot(z, em) - 0.155));
+            float zh = abs(z.x * eh.y - z.y * eh.x) - 0.007;
+            zh = max(zh, max(-dot(z, eh) - 0.02, dot(z, eh) - 0.1));
+            float zeiger = 1.0 - smoothstep(0.0, 0.003, min(zm, zh));
+            alb = vec3(0.85, 0.8, 0.68) * (1.0 - 0.9 * max(striche, zeiger));
+            alb = mix(alb, vec3(0.6, 0.45, 0.2), smoothstep(0.17, 0.185, r));
+            eigen += vec3(1.0, 0.85, 0.6) * glocke * 0.5 * (1.0 - max(striche, zeiger));
+        } else if (m < 13.5) {
+            alb = vec3(0.8, 0.6, 0.25);
+            glanz = 0.8;
+        } else {
+            alb = vec3(0.85, 0.8, 0.7);
+            eigen += vec3(1.0, 0.7, 0.4) * 0.15;
         }
         // Licht: Kamin, Baum (Lichterkette), Deckenlampe; draussen Mondlicht
         vec3 licht;
@@ -1545,7 +2366,11 @@ void main() {
             licht = kaminLicht() * max(dot(n, kl / kd), 0.0) * 4.0 / (1.0 + kd * kd * 0.5);
             vec3 bl = BAUM + vec3(0.0, 1.5, 0.0) - p;
             float bd = length(bl);
-            licht += vec3(1.0, 0.75, 0.42) * (max(dot(n, bl / bd), 0.0) * 0.7 + 0.3) * 2.2 / (1.0 + bd * bd * 0.45);
+            licht += vec3(1.0, 0.75, 0.42) * (max(dot(n, bl / bd), 0.0) * 0.7 + 0.3) * 2.2 / (1.0 + bd * bd * 0.45) * (0.3 + 0.7 * kette);
+            // die Kerzen im Schwibbogen
+            vec3 swl = vec3(KOMMODE.x, 1.15, KOMMODE.z - 0.15) - p;
+            float swd = length(swl);
+            licht += vec3(1.0, 0.7, 0.35) * (max(dot(n, swl / swd), 0.0) * 0.8 + 0.2) * 0.9 / (1.0 + swd * swd * 2.0);
             licht += vec3(0.9, 0.75, 0.55) * (0.15 + 0.15 * n.y) * raumLicht;
             // der Stern auf der Spitze strahlt in den Raum
             vec3 sl = BAUM + vec3(0.0, SPITZE + 0.15, 0.0) - p;
@@ -1569,20 +2394,22 @@ void main() {
     }
     // die Scheibe: wer davor steht, sieht Spiegelung und Eisblumen in den Ecken
     float tg = (WAND_Z - 0.05 - ro.z) / rd.z;
-    if (tg > 0.0 && (hit < 0.0 || tg < hit)) {
+    float zu = pow(1.0 - oeffnen(), 3.0);
+    if (zu > 0.0 && tg > 0.0 && (hit < 0.0 || tg < hit)) {
         vec3 gp = ro + rd * tg;
         vec2 s = gp.xy - vec2(0.0, 1.55);
         if (abs(s.x) < 1.0 && abs(s.y) < 0.8) {
             vec2 scheibe = vec2(abs(s.x) - 0.5, s.y - (s.y > 0.12 ? 0.46 : -0.33));
             float ecke = length(abs(scheibe) - vec2(0.48, 0.33 + (s.y > 0.12 ? -0.0 : 0.12)));
             float eis = smoothstep(0.35, 0.05, ecke + 0.12 * rausch(gp.xy * 14.0)) * (0.6 + 0.4 * rausch(gp.xy * 40.0));
-            c = mix(c, vec3(0.7, 0.8, 0.95), eis * 0.55);
-            c += vec3(0.6, 0.7, 0.9) * 0.04;
+            c = mix(c, vec3(0.7, 0.8, 0.95), eis * 0.55 * zu);
+            c += vec3(0.6, 0.7, 0.9) * 0.04 * zu;
         }
     }
     c += glimmen * (1.0 + 0.5 * ton);
-    // der Stern auf der Spitze, im Bild gezeichnet: vor dem Aufgehen ein
-    // matter goldener Umriss, danach hell mit Strahlen
+    // der Stern auf der Spitze, im Bild gezeichnet: fuenf scharfe Zacken mit
+    // je einer hellen und einer dunklen Facette, die sich beim Wiegen tauschen;
+    // vor dem Aufgehen mattes Gold, danach hell mit Strahlen
     vec3 sp = BAUM + vec3(0.0, SPITZE + 0.15, 0.0) - ro;
     float sz = dot(sp, vorne);
     if (sz > 0.1) {
@@ -1590,10 +2417,18 @@ void main() {
         vec2 q = uv - su;
         float r = length(q);
         float a = atan(q.y, q.x) + PI * 0.5;
-        float zacke = 0.5 + 0.5 * cos(a * 5.0);
-        float groesse = 0.2 / sz;
-        float form = smoothstep(groesse * (0.45 + 0.55 * zacke), groesse * (0.45 + 0.55 * zacke) - 0.004, r);
-        c = mix(c, vec3(0.55, 0.42, 0.15) * (1.0 + stern * 4.0), form);
+        float R = 0.16 / sz;
+        float wiegen = sin(time * 0.9);
+        vec2 qs = vec2(q.x / (0.82 + 0.18 * cos(time * 0.9)), q.y);
+        float sd = sdStern5(qs, R, 0.42);
+        float px = 1.5 / resolution.y;
+        float form = smoothstep(px, -px, sd);
+        float sek = mod(atan(qs.x, qs.y) + PI / 5.0, 2.0 * PI / 5.0) - PI / 5.0;
+        float facette = 0.78 + 0.3 * sign(sek) * (0.6 + 0.4 * wiegen);
+        facette *= 0.8 + 0.45 * (1.0 - clamp(length(qs) / R, 0.0, 1.0));
+        vec3 gold = mix(vec3(0.5, 0.36, 0.12), vec3(1.0, 0.82, 0.42) * (1.0 + stern * 3.0), 0.25 + 0.75 * stern) * facette;
+        gold *= 1.0 - 0.45 * smoothstep(-px * 3.0, 0.0, sd);
+        c = mix(c, gold, form);
         float strahl = pow(abs(cos(a * 2.0)), 50.0) + pow(abs(cos(a * 2.0 + 0.785)), 70.0) * 0.5;
         c += vec3(1.0, 0.88, 0.6) * stern * (exp(-r * 30.0) * 2.0 + strahl * exp(-r * 4.0) * 1.0 + exp(-r * 2.5) * 0.3) * (1.0 + 0.3 * ton);
         // Mitternacht: ein Lichtring von der Spitze aus je Glockenschlag
@@ -1646,6 +2481,28 @@ const float PI = 3.14159265;
 const vec3 SEE = vec3(0.0, 0.0, 26.0);
 const float SEE_R = 17.0;
 const vec3 MOND = vec3(0.1696, 0.2694, 0.9479);
+// die Huette am anderen Ufer, ihr Licht spiegelt sich im Eis
+const vec3 HUETTE = vec3(7.5, 0.0, 47.0);
+const int EISLICHTER = 13;
+
+// Ein Eislicht (eine Kerze im Glas) am Ufer: auf der fernen Seite des Sees
+vec3 eislicht(int i) {
+    float a = -1.55 + float(i) * (3.1 / float(EISLICHTER - 1));
+    float r = SEE_R + 0.45;
+    return SEE + vec3(sin(a) * r, 0.22, cos(a) * r);
+}
+// die Lichter der Huette: zwei Fenster und die Tuer
+vec3 huettenLicht(int i) {
+    if (i == 0) return HUETTE + vec3(-1.1, 0.95, -1.75);
+    if (i == 1) return HUETTE + vec3(1.1, 0.95, -1.75);
+    return HUETTE + vec3(0.0, 0.6, -1.75);
+}
+
+// Zwei Schlittschuhlaeufer: der eine faehrt Achten, der andere weite Boegen
+vec3 laeuferOrt(int i, float t) {
+    if (i == 0) return SEE + vec3(5.5 * sin(0.33 * t), 0.0, -4.0 + 3.2 * sin(0.66 * t));
+    return SEE + vec3(-2.5 + 4.8 * cos(0.27 * t + 1.0), 0.0, 1.0 + 3.4 * sin(0.27 * t + 1.0));
+}
 
 float kapsel(vec3 p, vec3 a, vec3 b, float r) {
     vec3 pa = p - a, ba = b - a;
@@ -1683,8 +2540,67 @@ float reh(vec3 p) {
     return d;
 }
 
-// Material: 0 Schnee, 1 Eis, 2 Tanne, 3 Stamm, 4 Reh
+float sdBox(vec3 p, vec3 b) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+// Die Huette: Blockhaus mit Satteldach und Schornstein
+float huette(vec3 p, out float m) {
+    vec3 q = p - HUETTE;
+    float d = sdBox(q - vec3(0.0, 0.7, 0.0), vec3(2.2, 1.2, 1.7));
+    m = 5.0;
+    float y = q.y - 1.9;
+    vec2 n = normalize(vec2(1.4, 2.05));
+    float dach = max(max(dot(n, vec2(abs(q.z), y)) - n.x * 2.05, -y - 0.12), abs(q.x) - 2.45) - 0.04;
+    if (dach < d) { d = dach; m = 6.0; }
+    float sch = sdBox(q - vec3(1.2, 2.9, 0.4), vec3(0.22, 0.75, 0.22));
+    if (sch < d) { d = sch; m = 6.0; }
+    return d;
+}
+
+// Ein Schlittschuhlaeufer in voller Fahrt: vorgebeugt, ein Bein stoesst ab,
+// die Arme schwingen; er neigt sich in die Kurve. teil: 0 Mantel, 1 Gesicht,
+// 2 Schal und Muetze
+float laeuferTeil;
+float laeufer(vec3 p, int i) {
+    float t = time;
+    vec3 o = laeuferOrt(i, t);
+    vec3 lp = p - o;
+    if (dot(lp, lp) > 6.0) return length(lp) - 1.9;
+    vec3 v = laeuferOrt(i, t + 0.05) - o;
+    vec3 v2 = laeuferOrt(i, t + 0.1) - 2.0 * laeuferOrt(i, t + 0.05) + o;
+    vec3 f = normalize(v);
+    vec3 sd = vec3(f.z, 0.0, -f.x);
+    // in die Kurve legen
+    float neig = clamp(dot(v2, sd) * 60.0, -0.35, 0.35);
+    vec3 q = vec3(dot(lp, sd), lp.y, dot(lp, f));
+    float c = cos(neig), s = sin(neig);
+    q.xy = vec2(c * q.x + s * q.y, -s * q.x + c * q.y);
+    float schritt = sin(t * 2.6 + float(i) * 1.7);
+    float d = kapsel(q, vec3(0.0, 0.95, -0.05), vec3(0.0, 1.38, 0.22), 0.17);
+    laeuferTeil = 0.0;
+    float kopf = length(q - vec3(0.0, 1.58, 0.33)) - 0.105;
+    if (kopf < d) { d = kopf; laeuferTeil = 1.0; }
+    float schal = min(length(q - vec3(0.0, 1.45, 0.27)) - 0.11, length(q - vec3(0.0, 1.66, 0.3)) - 0.1);
+    schal = min(schal, kapsel(q, vec3(0.05, 1.45, 0.2), vec3(0.1, 1.3, -0.25 - 0.1 * schritt), 0.035));
+    if (schal < d) { d = schal; laeuferTeil = 2.0; }
+    // Beine: das eine traegt, das andere stoesst schraeg nach hinten ab
+    float a = 0.12 + 0.3 * max(schritt, 0.0);
+    float b = 0.12 + 0.3 * max(-schritt, 0.0);
+    float beine = min(kapsel(q, vec3(0.09, 0.95, 0.0), vec3(0.09 + a, 0.05 + a * 0.4, -a * 1.2), 0.07),
+                      kapsel(q, vec3(-0.09, 0.95, 0.0), vec3(-0.09 - b, 0.05 + b * 0.4, -b * 1.2), 0.07));
+    if (beine < d) { d = beine; laeuferTeil = 0.0; }
+    float arme = min(kapsel(q, vec3(0.2, 1.33, 0.2), vec3(0.45, 1.0, 0.25 + 0.35 * schritt), 0.05),
+                     kapsel(q, vec3(-0.2, 1.33, 0.2), vec3(-0.45, 1.0, 0.25 - 0.35 * schritt), 0.05));
+    if (arme < d) { d = arme; laeuferTeil = 0.0; }
+    return d;
+}
+
+// Material: 0 Schnee, 1 Eis, 2 Tanne, 3 Stamm, 4 Reh, 5 Huette, 6 Dach und
+// Schornstein, 7 Laeufer, 8 Glas eines Eislichts
 float mat;
+float laeuferNr;
 float szene(vec3 p) {
     float rs = length(p.xz - SEE.xz);
     // Gelaende: Schnee, zum See hin abfallend, ausserhalb sanfte Huegel
@@ -1697,7 +2613,7 @@ float szene(vec3 p) {
     vec2 versatz = (vec2(hash(zelle), hash(zelle + 4.7)) - 0.5) * 1.2;
     vec2 mitte = (zelle + 0.5) * 3.2 + versatz;
     float rm = length(mitte - SEE.xz);
-    bool frei = rm > SEE_R + 1.2 && !(mitte.y < 15.0 && abs(mitte.x) < 7.0 && mitte.y > -20.0);
+    bool frei = rm > SEE_R + 1.2 && !(mitte.y < 15.0 && abs(mitte.x) < 7.0 && mitte.y > -20.0) && length(mitte - HUETTE.xz) > 4.5;
     if (frei) {
         float groesse = 0.8 + hash(zelle + 9.1) * 0.6;
         vec3 q = vec3(lz.x - versatz.x, p.y, lz.y - versatz.y) / groesse;
@@ -1715,7 +2631,59 @@ float szene(vec3 p) {
     }
     float r = reh(p);
     if (r < d) { d = r; mat = 4.0; }
+    float hm;
+    float h = huette(p, hm);
+    if (h < d) { d = h; mat = hm; }
+    for (int i = 0; i < 2; i++) {
+        float l = laeufer(p, i);
+        if (l < d) { d = l; mat = 7.0; laeuferNr = float(i); }
+    }
+    // die Glaeser der Eislichter (nur in ihrer Naehe gerechnet)
+    float ufer = abs(length(p.xz - SEE.xz) - (SEE_R + 0.45)) - 0.2;
+    if (ufer < 0.3 && p.y < 0.6) {
+        for (int i = 0; i < EISLICHTER; i++) {
+            vec3 q = p - eislicht(i) + vec3(0.0, 0.12, 0.0);
+            float glas = max(length(q.xz) - 0.08, abs(q.y) - 0.13);
+            if (glas < d) { d = glas; mat = 8.0; }
+        }
+    } else {
+        d = min(d, max(ufer, p.y - 0.6) + 0.05);
+    }
     return d;
+}
+
+// Die warmen Lichter (Huette, Eislichter): ihr Schein im Dunst, wo der
+// Strahl an ihnen vorbeigeht, und ihr Spiegelbild im Eis -- auf dem rauhen
+// Eis senkrecht zu einem Streifen gezogen
+float flackern(float i) { return 0.8 + 0.2 * sin(time * 9.0 + i * 3.1) * sin(time * 4.3 + i); }
+vec3 lichtSchein(vec3 ro, vec3 rd, float tmax) {
+    vec3 c = vec3(0.0);
+    for (int i = 0; i < EISLICHTER + 3; i++) {
+        vec3 l = i < EISLICHTER ? eislicht(i) : huettenLicht(i - EISLICHTER);
+        float tc = dot(l - ro, rd);
+        if (tc < 0.0 || tc > tmax + 0.4) continue;
+        vec3 q = ro + rd * tc - l;
+        float d2 = dot(q, q) / max(tc * 0.03, 1.0);
+        float k = i < EISLICHTER ? 1.0 : 1.6;
+        c += vec3(1.0, 0.62, 0.28) * (exp(-d2 * 90.0) * 2.2 + exp(-d2 * 4.0) * 0.08) * k * flackern(float(i));
+    }
+    return c;
+}
+vec3 lichtImEis(vec3 p, vec3 rr) {
+    vec3 c = vec3(0.0);
+    vec2 rh = normalize(rr.xz);
+    for (int i = 0; i < EISLICHTER + 3; i++) {
+        vec3 l = i < EISLICHTER ? eislicht(i) : huettenLicht(i - EISLICHTER);
+        vec3 v = normalize(l - p);
+        // seitlicher Winkel ohne atan: das Kreuzprodukt der waagrechten Richtungen
+        vec2 vh = normalize(v.xz);
+        float dx = rh.x * vh.y - rh.y * vh.x;
+        if (dot(rh, vh) < 0.0) continue;
+        float dy = rr.y - v.y;
+        float k = i < EISLICHTER ? 1.0 : 1.8;
+        c += vec3(1.0, 0.6, 0.25) * exp(-dx * dx * 9000.0 - dy * dy * 350.0) * 1.4 * k * flackern(float(i));
+    }
+    return c;
 }
 
 vec3 normale(vec3 p) {
@@ -1737,6 +2705,24 @@ vec3 himmel(vec3 d) {
     c += mix(vec3(0.1, 0.9, 0.5), vec3(0.4, 0.3, 1.0), smoothstep(0.2, 0.5, d.y)) * band * strahl * 0.12 * (1.0 + 0.6 * ton);
     float m = dot(d, MOND);
     float scheibe = smoothstep(0.99982, 0.9999, m);
+    // die Eule: auf ihren Ruf (Takt 3 und 10 des Waldes) fliegt sie mit
+    // schlagenden Fluegeln vor dem Mond vorbei, als Schattenriss
+    float flug = max(clamp((fort * 16.0 - 3.0) / 2.2, 0.0, 1.0) * step(fort * 16.0, 5.2), clamp((fort * 16.0 - 10.0) / 2.2, 0.0, 1.0) * step(fort * 16.0, 12.2));
+    if (flug > 0.0 && flug < 1.0) {
+        vec3 ex = normalize(cross(MOND, vec3(0.0, 1.0, 0.0)));
+        vec3 ey = cross(ex, MOND);
+        vec2 mq = vec2(dot(d, ex), dot(d, ey)) / 0.0145;
+        vec2 o = vec2(mix(-3.5, 3.5, flug), 0.25 + 0.4 * sin(flug * 3.14159) - 0.15);
+        vec2 e = mq - o;
+        float schlag = sin(time * 9.0);
+        float koerper = length(e / vec2(0.32, 0.2)) - 1.0;
+        vec2 fl = vec2(abs(e.x), e.y - schlag * 0.25 * abs(e.x));
+        float fluegel = length((fl - vec2(0.55, 0.05)) / vec2(0.6, 0.09)) - 1.0;
+        float eule = min(koerper, fluegel);
+        float sil = smoothstep(0.15, -0.05, eule);
+        scheibe *= 1.0 - sil;
+        c = mix(c, vec3(0.01, 0.015, 0.03), sil * 0.8);
+    }
     // Mare auf der Scheibe: dunklere Flecken aus Rauschen
     vec2 mq = vec2(d.x - MOND.x, d.y - MOND.y) * 300.0;
     c += vec3(0.98, 0.97, 0.9) * scheibe * (2.4 - 0.7 * rausch(mq * 0.8 + 3.0));
@@ -1825,10 +2811,60 @@ vec3 schattieren(vec3 p, vec3 rd, float m, vec3 n) {
         alb = mix(vec3(0.02, 0.07, 0.04), vec3(0.8, 0.86, 0.95), schnee);
     } else if (m < 3.5) {
         alb = vec3(0.08, 0.05, 0.03);
-    } else {
+    } else if (m < 4.5) {
         alb = vec3(0.18, 0.1, 0.06);
+    } else if (m < 5.5) {
+        // Blockhaus: liegende Stämme
+        alb = vec3(0.2, 0.1, 0.05) * (0.7 + 0.3 * smoothstep(0.0, 0.25, abs(fract(p.y * 3.2) - 0.5)));
+        if (n.y > 0.6) alb = vec3(0.85, 0.9, 1.0);
+    } else if (m < 6.5) {
+        alb = n.y > 0.3 ? vec3(0.85, 0.9, 1.0) : vec3(0.15, 0.07, 0.04);
+    } else if (m < 7.5) {
+        float w = laeuferNr;
+        alb = laeuferTeil < 0.5 ? (w < 0.5 ? vec3(0.08, 0.1, 0.25) : vec3(0.3, 0.05, 0.06))
+            : laeuferTeil < 1.5 ? vec3(0.85, 0.6, 0.48)
+            : (w < 0.5 ? vec3(0.85, 0.12, 0.1) : vec3(0.9, 0.85, 0.75));
+    } else {
+        alb = vec3(0.3, 0.25, 0.2);
     }
-    return alb * licht + vec3(0.7, 0.75, 0.9) * kante * 0.6;
+    // das warme Licht der Huette und der Eislichter auf allem in ihrer Naehe
+    vec3 warm = vec3(0.0);
+    for (int i = 0; i < EISLICHTER + 3; i++) {
+        vec3 l = (i < EISLICHTER ? eislicht(i) : huettenLicht(i - EISLICHTER)) - p;
+        float dd = dot(l, l);
+        if (dd > 40.0) continue;
+        warm += vec3(1.0, 0.6, 0.28) * (0.35 + 0.65 * max(dot(n, l * inversesqrt(dd)), 0.0)) / (1.0 + dd * 1.6) * (i < EISLICHTER ? 0.9 : 2.5);
+    }
+    vec3 c = alb * (licht + warm) + vec3(0.7, 0.75, 0.9) * kante * 0.6;
+    if (m > 4.5 && m < 5.5) {
+        // die Fenster und die Tuer leuchten
+        vec3 q = p - HUETTE;
+        if (q.z < -1.6) {
+            vec2 f1 = vec2(abs(abs(q.x) - 1.1), q.y - 0.95);
+            float fenster = step(f1.x, 0.38) * step(abs(f1.y), 0.3) * (1.0 - step(abs(f1.x), 0.025) * 1.0) * (1.0 - step(abs(f1.y), 0.025));
+            float tuer = step(abs(q.x), 0.35) * step(q.y, 1.25) * step(-0.5, q.y);
+            c = mix(c, vec3(1.0, 0.62, 0.28) * 2.2 * flackern(14.0), max(fenster, tuer * 0.6));
+        }
+    }
+    if (m > 7.5) c += vec3(1.0, 0.65, 0.3) * 1.2;
+    return c;
+}
+
+// Sternschnuppen: alle drei Takte eine, auf der Eins, quer ueber den
+// oberen Himmel -- ein heller Kopf mit einem Schweif, der verglueht
+vec3 sternschnuppe(vec2 uv) {
+    float k = floor(takt / 3.0);
+    float f = (takt - k * 3.0) / 0.45;
+    if (f > 1.0 || hash(vec2(k, 2.0)) < 0.25) return vec3(0.0);
+    vec2 a = vec2(-0.75 + 0.9 * hash(vec2(k, 0.0)), 0.25 + 0.2 * hash(vec2(k, 1.0)));
+    vec2 v = normalize(vec2(1.0, -0.35 - 0.3 * hash(vec2(k, 3.0)))) * 0.75;
+    vec2 kopf = a + v * f;
+    vec2 schweif = a + v * max(f - 0.35, 0.0);
+    vec2 ks = kopf - schweif;
+    float h = clamp(dot(uv - schweif, ks) / max(dot(ks, ks), 1e-5), 0.0, 1.0);
+    float r = length(uv - schweif - ks * h);
+    float glut = sin(f * PI);
+    return vec3(0.85, 0.92, 1.0) * (exp(-r * 900.0) * h * h * 2.5 + exp(-length(uv - kopf) * 180.0) * 1.5) * glut;
 }
 
 void main() {
@@ -1879,6 +2915,13 @@ void main() {
             // die Mondbahn: viele kleine Glanzpunkte auf dem Eis
             float bahn = pow(max(dot(normalize(vec3(rr.x, abs(rr.y), rr.z)), MOND), 0.0), 300.0);
             c += vec3(0.9, 0.92, 1.0) * bahn * step(0.6, hash(floor(w * 90.0))) * smoothstep(0.4, 0.0, length(fract(w * 90.0) - 0.5)) * 4.0;
+            // die warmen Lichter am Ufer spiegeln sich
+            c += lichtImEis(p, rr) * (1.0 - saum * 0.5);
+            // die Laeufer: ein dunkler Schatten unter ihnen
+            for (int i = 0; i < 2; i++) {
+                vec3 lo = laeuferOrt(i, time);
+                c *= 1.0 - 0.5 * exp(-dot(p.xz - lo.xz, p.xz - lo.xz) * 3.0);
+            }
             // Eisblumen, die leuchten, wenn ein Ton erklingt
             float eb = eisblumen(w);
             c += vec3(0.55, 0.85, 1.0) * eb * (0.7 + 1.2 * ton);
@@ -1890,6 +2933,22 @@ void main() {
         c = mix(c, nebel, 1.0 - exp(-hit * 0.028));
     } else {
         c = himmel(rd);
+        c += sternschnuppe(uv);
+    }
+    c += lichtSchein(ro, rd, hit > 0.0 ? hit : 80.0);
+    // Rauch aus dem Schornstein der Huette, ein Schleier ueber dem Dach
+    {
+        vec3 sp = HUETTE + vec3(1.2, 3.7, 0.4);
+        float tc = max(dot(sp + vec3(0.5, 2.0, 0.0) - ro, rd), 0.0);
+        if (hit < 0.0 || tc < hit) {
+            vec3 q = ro + rd * tc - sp;
+            float hy = clamp(q.y, 0.0, 6.0);
+            vec2 achse = vec2(q.x - hy * 0.35, q.z);
+            float rr2 = 0.3 + hy * 0.25;
+            float dichte = exp(-dot(achse, achse) / (rr2 * rr2)) * smoothstep(-0.2, 0.4, q.y) * smoothstep(6.0, 1.0, q.y);
+            dichte *= 0.5 + 0.8 * rausch(vec2(q.y * 1.4 - time * 0.8, q.x * 2.0));
+            c = mix(c, vec3(0.3, 0.32, 0.4), clamp(dichte * 0.5, 0.0, 0.6));
+        }
     }
     // Diamantstaub: Glitzer in der Luft, im Mondlicht dichter
     vec2 g = floor(fragTexCoord * resolution / 3.0);
@@ -1909,12 +2968,14 @@ IMPORT "audio"
 '
 ' Die Reise geht ueber den Adventskranz: zu jeder Kerze ein Kapitel. Die
 ' erste Kerze entzuendet sich, die Kamera faehrt in ihre Flamme -- und steht
-' im verschneiten Dorf bei Nacht. Die zweite fuehrt auf den Weihnachtsmarkt
-' (ein Karussell dreht sich im Takt), die dritte in den Winterwald an einen
-' zugefrorenen See, wo Eiskristalle mit der Melodie wachsen, die vierte auf
-' einen Schlittenflug vor dem Mond. Am Heiligabend sieht man durchs Fenster
-' in die Stube: der Baum schmueckt sich Kugel fuer Kugel zu "Stille Nacht",
-' um Mitternacht schlagen die Glocken, und der Stern auf der Spitze geht auf.
+' ueber einem Tal im Winterwald, wo Haus um Haus ein Dorf aus dem Schnee
+' waechst. Die zweite fuehrt auf den Weihnachtsmarkt (ein Karussell dreht
+' sich im Takt, Leute schlendern zwischen den Buden), die dritte in den
+' Winterwald an einen zugefrorenen See, wo Eiskristalle mit der Melodie
+' wachsen, die vierte auf einen Schlittenflug vor dem Mond. Am Heiligabend
+' oeffnet sich das Fenster zur Stube: der Baum entfaltet sich und schmueckt
+' sich Kugel fuer Kugel zu "Stille Nacht", um Mitternacht schlagen die
+' Glocken, und der Stern auf der Spitze geht auf.
 '
 ' Die Musik (musik.dh) ist ganz synthetisiert -- festlich-elektronisch, 116
 ' Schlaege je Minute, um das Glockenmotiv aus "Shchedryk" ("Carol of the
@@ -1953,7 +3014,9 @@ IMPORT "audio"
 ' dann mit Klavier, Chor und Streichern. Um Mitternacht schlagen die Glocken.
 '
 ' Instrumente: Celesta, Spieluhr, Glockenspiel, Roehrenglocken,
-' Schlittenschellen, Streicherflaechen, Chor, Klavier, Supersaw; Geraeusche:
+' Schlittenschellen, Streicherflaechen, Chor, Klavier, Supersaw, Blaeser und
+' Pauken (Fanfaren zu den Kapiteln, Wirbel davor, der Stern und der Gruss im
+' Abspann mit vollem Blech); Geraeusche:
 ' Schritte im Schnee, Stimmengewirr auf dem Markt, Wind und Eule im Wald,
 ' Kaminknistern, Uhrticken, ferne Kirchenglocken.
 ' === IMPORT MODULE audio ===
@@ -1981,6 +3044,20 @@ CONST AB_MITTERNACHT = 96
 CONST AB_STERN = 99
 CONST AB_AUS = 100
 CONST RUECKUNG = 2
+' Wann sich am Kranz die naechste Kerze entzuendet (in Takten nach Beginn)
+CONST KERZE_AN = 0.75
+
+' Wie viele Kerzen am Kranz brennen (mit Bruchteil: die naechste entzuendet
+' sich gerade) -- fuer die Bilder, im selben Augenblick wie der Glockenschlag
+' (Abschnitt Kerzen in schrittPlanen). Die erste im Intro auf Takt 5, die
+' weiteren eine punktierte Halbe nach Beginn des Zwischenspiels, wenn das
+' Licht des Uebergangs gewichen ist.
+FUNCTION kerzenBrennen(takt AS FLOAT) AS FLOAT
+    IF takt < AB_KRANZ2 THEN RETURN CLAMP((takt - 4.9) * 2.5, 0.0, 1.0)
+    IF takt < AB_KRANZ3 THEN RETURN 1.0 + CLAMP((takt - (AB_KRANZ2 + KERZE_AN)) * 2.0, 0.0, 1.0)
+    IF takt < AB_KRANZ4 THEN RETURN 2.0 + CLAMP((takt - (AB_KRANZ3 + KERZE_AN)) * 2.0, 0.0, 1.0)
+    RETURN 3.0 + CLAMP((takt - (AB_KRANZ4 + KERZE_AN)) * 2.0, 0.0, 1.0)
+END FUNCTION
 
 FUNCTION msJeSchritt() AS FLOAT
     RETURN 60000.0 / TEMPO / 4.0
@@ -2660,6 +3737,69 @@ FUNCTION streicher(nr AS INTEGER, mitChor AS BOOLEAN) AS SOUND
     RETURN merken(k, s)
 END FUNCTION
 
+' --- Festliches Blech ------------------------------------------------------------
+
+' Eine Blaeserstimme: drei leicht verstimmte Saegen durch einen Tiefpass, der
+' sich ueber den Ton oeffnet -- der Ton schwillt hell an wie ein Horn oder
+' eine Trompete. Kurze Toene bleiben dunkler, lange strahlen.
+SUB blechStimme(ziel AS SOUND, f AS FLOAT, dauer AS INTEGER, pan AS FLOAT, vol AS FLOAT)
+    DIM c AS INTEGER
+    FOR c = -1 TO 1
+        DIM fc AS FLOAT : fc = f * 2.0 ^ (c * 7.0 / 1200.0)
+        dazuPan(ziel, AUDIO_SFX("saw", fc, 0, 45, dauer, 260, 0.0035, 5.3 + c * 0.4, vol, 0.0, 0.5, 0, 0, 500 + f * 1.4, 2600, 0.25), 0, 1.0, pan + c * 0.3)
+    NEXT
+END SUB
+
+' Ein Blaeserton (Melodie), `schritte` Sechzehntel lang
+FUNCTION blech(midi AS INTEGER, schritte AS INTEGER) AS SOUND
+    DIM k AS STRING : k = "blech" + STR$(midi) + "_" + STR$(schritte)
+    IF trocken THEN RETURN vormerken(k, FUNCTION() blech(midi, schritte))
+    DIM i AS INTEGER : i = gemerkt(k)
+    IF i >= 0 THEN RETURN klaenge[i]
+    DIM dauer AS INTEGER : dauer = INT(msJeSchritt() * schritte) - 20
+    DIM t AS SOUND : t = AUDIO_SOUND_NEW(dauer + 700)
+    blechStimme(t, hz(midi), dauer, 0.0, 0.16)
+    blechStimme(t, hz(midi - 12), dauer, 0.0, 0.08)
+    RETURN merken(k, mitEcho(t, dauer + 700, 0.3, 0.25, 2))
+END FUNCTION
+
+' Ein Blaeserakkord: die vier Akkordtoene, eine Oktave hoeher gelegt, und der
+' Grundton als Posaune darunter
+FUNCTION blechAkkord(nr AS INTEGER, schritte AS INTEGER) AS SOUND
+    DIM k AS STRING : k = "blechA" + STR$(nr) + "_" + STR$(schritte)
+    IF trocken THEN RETURN vormerken(k, FUNCTION() blechAkkord(nr, schritte))
+    DIM i AS INTEGER : i = gemerkt(k)
+    IF i >= 0 THEN RETURN klaenge[i]
+    DIM dauer AS INTEGER : dauer = INT(msJeSchritt() * schritte) - 20
+    DIM t AS SOUND : t = AUDIO_SOUND_NEW(dauer + 700)
+    DIM v AS INTEGER
+    FOR v = 0 TO 3
+        blechStimme(t, hz(akkTon(nr, v) + 12), dauer, (v - 1.5) * 0.35, 0.075)
+    NEXT
+    blechStimme(t, hz(grundTon(nr) + 24), dauer, 0.0, 0.1)
+    RETURN merken(k, mitEcho(t, dauer + 700, 0.35, 0.22, 2))
+END FUNCTION
+
+' Pauke: ein tiefer Sinus, der beim Anschlag ein wenig nachgibt, die Quinte
+' darueber leise, und ein dumpfer Schlag aus Rauschen
+FUNCTION pauke(midi AS INTEGER) AS SOUND
+    DIM k AS STRING : k = "pauke" + STR$(midi)
+    IF trocken THEN RETURN vormerken(k, FUNCTION() pauke(midi))
+    DIM i AS INTEGER : i = gemerkt(k)
+    IF i >= 0 THEN RETURN klaenge[i]
+    DIM f AS FLOAT : f = hz(midi)
+    DIM t AS SOUND : t = AUDIO_SOUND_NEW(1500)
+    dazu(t, AUDIO_SFX("sine", f * 1.04, -f * 0.25, 2, 40, 1300, 0, 0, 0.45), 0, 1.0)
+    dazu(t, AUDIO_SFX("sine", f * 1.51, -f * 0.3, 2, 20, 600, 0, 0, 0.15), 0, 1.0)
+    dazu(t, AUDIO_SFX("noise", 600, 0, 0, 8, 140, 0, 0, 0.6, 0.0, 0.5, 0, 0, 900, -2000, 0.2), 0, 0.35)
+    RETURN merken(k, t)
+END FUNCTION
+
+' Der Ton der Pauke zum Akkord: sein Grundton in der Lage der Pauken (F2..E3)
+FUNCTION paukenTon(nr AS INTEGER) AS INTEGER
+    RETURN 41 + ((grundTon(nr) - 41) MOD 12 + 12) MOD 12
+END FUNCTION
+
 ' --- Geraeusche ---------------------------------------------------------------
 
 ' Schritte im Schnee: zwei Schritte, jeder ein Knirschen aus kurzen, dumpfen
@@ -2850,7 +3990,7 @@ FUNCTION imKranz(takt AS INTEGER) AS BOOLEAN
 END FUNCTION
 
 ' Eine Melodie-Stimme in Schritt n: aus der Melodie m, `art` 0 = Lead,
-' 1 = Klavier, 2 = Celesta; die Stelle zaehlt ab dem Takt `von`.
+' 1 = Klavier, 2 = Celesta, 3 = Blech; die Stelle zaehlt ab dem Takt `von`.
 SUB melodieSpielen(n AS INTEGER, m AS ARRAY OF INTEGER, von AS INTEGER, art AS INTEGER, vol AS FLOAT, oktave AS INTEGER)
     DIM takt AS INTEGER : takt = n \ SCHRITTE_JE_TAKT
     DIM s AS INTEGER : s = n MOD SCHRITTE_JE_TAKT
@@ -2864,7 +4004,22 @@ SUB melodieSpielen(n AS INTEGER, m AS ARRAY OF INTEGER, von AS INTEGER, art AS I
         CASE 0 : spielen(lead(ton, achtel), n, vol)
         CASE 1 : spielen(klavier(ton, achtel), n, vol)
         CASE 2 : spielen(celesta(ton, MIN(achtel, 4)), n, vol)
+        CASE 3 : spielen(blech(ton, achtel * 2), n, vol)
     END SELECT
+END SUB
+
+' Eine Fanfare auf den Akkord nr: kurz -- kurz-kurz -- lang
+SUB fanfare(n AS INTEGER, s AS INTEGER, nr AS INTEGER, vol AS FLOAT)
+    IF s = 0 THEN spielen(blechAkkord(nr, 2), n, vol)
+    IF s = 2 THEN spielen(blechAkkord(nr, 1), n, vol * 0.8)
+    IF s = 3 THEN spielen(blechAkkord(nr, 1), n, vol * 0.85)
+    IF s = 4 THEN spielen(blechAkkord(nr, 12), n, vol)
+END SUB
+
+' Ein Paukenwirbel in der zweiten Haelfte eines Takts, lauter werdend, auf
+' den Grundton des Akkords, der danach kommt
+SUB wirbel(n AS INTEGER, s AS INTEGER, nachher AS INTEGER, vol AS FLOAT)
+    IF s >= 8 THEN spielen(pauke(paukenTon(nachher)), n, vol * (0.3 + 0.09 * (s - 8)))
 END SUB
 
 ' Alles, was in Schritt n erklingt.
@@ -2943,12 +4098,40 @@ SUB schrittPlanen(n AS INTEGER)
         IF takt >= AB_RUECKUNG THEN melodieSpielen(n, nachtMelodie, AB_SCHLITTEN, 0, 0.4, 12)
     END IF
 
+    ' --- Blech und Pauken ---
+    ' Fanfaren zu den Kapiteln, im Dorf weiche Hoerner, auf dem Markt (zweite
+    ' Haelfte) Akkorde mit Auftakt, der Stern und der Gruss im Abspann
+    IF takt = AB_MARKT OR takt = AB_MARKT + 8 OR takt = AB_SCHLITTEN OR takt = AB_RUECKUNG THEN fanfare(n, s, nr, 0.5)
+    IF takt >= AB_DORF + 8 AND takt < AB_KRANZ2 AND takt MOD 2 = 0 AND s = 0 THEN spielen(blechAkkord(nr, 28), n, 0.3)
+    IF takt > AB_MARKT + 8 AND takt < AB_KRANZ3 THEN
+        IF takt MOD 2 = 0 AND s = 0 THEN spielen(blechAkkord(nr, 6), n, 0.32)
+        IF takt MOD 2 = 1 AND takt < AB_KRANZ3 - 1 AND (s = 12 OR s = 14) THEN spielen(blechAkkord(akkordNr(takt + 1), 2), n, 0.27)
+    END IF
+    ' die Pauke auf jedem Akkordwechsel, wo die Bassdrum laeuft
+    IF treibt(takt) AND takt >= AB_MARKT AND takt MOD 2 = 0 AND s = 0 THEN spielen(pauke(paukenTon(nr)), n, 0.55)
+    IF imMarkt(takt) AND takt >= AB_MARKT + 8 AND takt MOD 2 = 0 AND s = 8 THEN spielen(pauke(paukenTon(nr)), n, 0.45)
+    ' Wirbel vor dem Markt, dem Schlittenflug, dem Stern und dem Gruss
+    IF takt = AB_KRANZ2 + 1 THEN wirbel(n, s, akkordNr(AB_MARKT), 0.55)
+    IF takt = AB_KRANZ4 + 1 THEN wirbel(n, s, akkordNr(AB_SCHLITTEN), 0.55)
+    IF takt = AB_STERN - 1 THEN wirbel(n, s, 16, 0.7)
+    IF takt = AB_AUS + 3 THEN wirbel(n, s, akkordNr(AB_AUS + 4), 0.6)
+    ' der Gruss im Abspann: die zweite Phrase des Marktes als Blaesersatz,
+    ' ueber denselben Akkorden wie auf dem Markt
+    IF takt >= AB_AUS + 4 AND takt < AB_AUS + 8 THEN
+        melodieSpielen(n, marktMelodie, AB_AUS, 3, 0.55, 0)
+        IF takt MOD 2 = 0 AND s = 0 THEN spielen(blechAkkord(nr, 28), n, 0.32)
+        IF takt MOD 2 = 0 AND s = 0 THEN spielen(pauke(paukenTon(nr)), n, 0.6)
+    END IF
+    IF n = (AB_AUS + 4) * SCHRITTE_JE_TAKT THEN spielen(crash(), n, 0.4)
+
     ' --- Stille Nacht ---
     DIM st AS INTEGER : st = snStelle(n)
     IF st >= 0 THEN
         DIM zweite AS BOOLEAN : zweite = n - AB_STUBE * SCHRITTE_JE_TAKT >= SN_STROPHE
         ' der Akkord je 6/8-Takt, in der zweiten Strophe mit Chor
         IF st MOD 12 = 0 THEN spielen(streicher(24 + snTaktAkkord[st \ 12], zweite), n, IIF(zweite, 0.9, 0.55))
+        ' in der zweiten Strophe leise Hoerner unter dem Chor
+        IF zweite AND st MOD 12 = 0 THEN spielen(blechAkkord(24 + snTaktAkkord[st \ 12], 12), n, 0.2)
         ' Wiegen: die Akkordtoene als Achtel im Sechsachteltakt (Spieluhr bzw. Celesta)
         IF st MOD 2 = 0 THEN
             DIM wv AS INTEGER : wv = (st \ 2) MOD 6
@@ -2979,6 +4162,8 @@ SUB schrittPlanen(n AS INTEGER)
     ' der Stern geht auf: ein Akkord, Glocken in Kaskade, Chor
     IF n = AB_STERN * SCHRITTE_JE_TAKT THEN
         spielen(crash(), n, 0.45)
+        spielen(blechAkkord(16, 16), n, 0.5)
+        spielen(pauke(paukenTon(16)), n, 0.9)
         spielen(flaeche(16, TRUE), n, 0.9)
         spielen(chor(16), n, 0.8)
     END IF
@@ -2999,7 +4184,9 @@ SUB schrittPlanen(n AS INTEGER)
     END IF
 
     ' --- Kerzen --- jede Kerze, die sich entzuendet, mit einem Glockenschlag
-    IF s = 0 AND (takt = 5 OR takt = AB_KRANZ2 OR takt = AB_KRANZ3 OR takt = AB_KRANZ4) THEN
+    ' (am Kranz eine punktierte Halbe nach der Eins, wenn das Licht des
+    ' Uebergangs gewichen ist -- main.dh zuendet sie im selben Augenblick)
+    IF (s = 0 AND takt = 5) OR (s = KERZE_AN * SCHRITTE_JE_TAKT AND (takt = AB_KRANZ2 OR takt = AB_KRANZ3 OR takt = AB_KRANZ4)) THEN
         spielen(roehrenglocke(IIF(takt = 5, 55, IIF(takt = AB_KRANZ2, 58, IIF(takt = AB_KRANZ3, 62, 67)))), n, 0.6)
     END IF
 
@@ -3449,12 +4636,14 @@ DIM ky1[MAX_STRICHE] AS INTEGER
 DIM kx2[MAX_STRICHE] AS INTEGER
 DIM ky2[MAX_STRICHE] AS INTEGER
 DIM kf[MAX_STRICHE] AS INTEGER
-' die Decke als Saeulen
-DIM dx1[SAEULEN] AS INTEGER
-DIM dy1[SAEULEN] AS INTEGER
-DIM dx2[SAEULEN] AS INTEGER
-DIM dy2[SAEULEN] AS INTEGER
-DIM df[SAEULEN] AS INTEGER
+' die Decke, gezeichnet in feinen Streifen von 2 Punkten, zwischen den
+' Saeulen weich verbunden (sonst sieht man die Treppe der Saeulen)
+CONST STREIFEN = 640
+DIM dx1[STREIFEN] AS INTEGER
+DIM dy1[STREIFEN] AS INTEGER
+DIM dx2[STREIFEN] AS INTEGER
+DIM dy2[STREIFEN] AS INTEGER
+DIM df[STREIFEN] AS INTEGER
 
 DIM si AS INTEGER
 RANDOMIZE(24)
@@ -3575,19 +4764,26 @@ SUB deckeZeichnen(zeit AS FLOAT)
     DIM j AS INTEGER
     DIM sicht AS FLOAT : sicht = schneeDraussen
     IF sicht <= 0.01 THEN RETURN
-    FOR j = 0 TO SAEULEN - 1
-        DIM h AS INTEGER : h = INT(liegt[j] * sicht)
-        dx1[j] = j * SAEULE_B : dx2[j] = j * SAEULE_B + SAEULE_B - 1
+    DIM schritt AS INTEGER : schritt = STREIFEN \ SAEULEN
+    FOR j = 0 TO STREIFEN - 1
+        ' Lage zwischen den Mitten zweier Saeulen, weich (Hermite) verbunden
+        DIM lage AS FLOAT : lage = (j + 0.5) / schritt - 0.5
+        DIM a AS INTEGER : a = CLAMP(INT(FLOOR(lage)), 0, SAEULEN - 1)
+        DIM b AS INTEGER : b = MIN(a + 1, SAEULEN - 1)
+        DIM t AS FLOAT : t = CLAMP(lage - a, 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
+        DIM h AS INTEGER : h = INT((liegt[a] + (liegt[b] - liegt[a]) * t) * sicht)
+        dx1[j] = j * 2 : dx2[j] = j * 2 + 1
         dy1[j] = HOEHE - h : dy2[j] = HOEHE
         df[j] = RGBA(150, 165, 195, MAX(1, INT(190 * sicht)))
     NEXT
-    BOXES(dx1, dy1, dx2, dy2, df, SAEULEN)
+    BOXES(dx1, dy1, dx2, dy2, df, STREIFEN)
     ' die Kante: ein feiner heller Saum und hier und da ein Funkeln
-    FOR j = 0 TO SAEULEN - 1
+    FOR j = 0 TO STREIFEN - 1
         dy2[j] = dy1[j] + 2
         df[j] = RGBA(235, 242, 255, MAX(1, INT(200 * sicht)))
     NEXT
-    BOXES(dx1, dy1, dx2, dy2, df, SAEULEN)
+    BOXES(dx1, dy1, dx2, dy2, df, STREIFEN)
     DIM ton AS FLOAT : ton = musikTon()
     FOR j = 0 TO SAEULEN - 1
         DIM fun AS FLOAT : fun = SIN(zeit * 3.0 + j * 2.37) * SIN(zeit * 1.3 + j * 0.71)
@@ -3700,8 +4896,8 @@ SUB beschriftung(takt AS FLOAT)
     kapitel("Vierter Advent", "Der Flug zum Mond", "Sleigh ride past the moon", takt, AB_SCHLITTEN)
     kapitel("Heiligabend", "Durchs Fenster in die Stube", "Through the window, Christmas Eve", takt, AB_STUBE)
     ' kleine Hinweise, was gerade zu sehen ist
-    zweisprachig("Fachwerk, Schnee und Mondlicht: alles im Fragment-Shader berechnet", _
-        "Half-timbering, snow and moonlight: all computed in a fragment shader", 646, 18, zeigen(takt, AB_DORF + 6, AB_DORF + 11), FALSE)
+    zweisprachig("Haus um Haus wächst das Dorf aus dem Schnee -- alles im Fragment-Shader berechnet", _
+        "House by house the village grows out of the snow -- all computed in a fragment shader", 646, 18, zeigen(takt, AB_DORF + 6, AB_DORF + 11), FALSE)
     zweisprachig("Das Karussell dreht sich auf der Audio-Uhr, im Takt der Bassdrum", _
         "The carousel turns on the audio clock, in time with the kick drum", 646, 18, zeigen(takt, AB_MARKT + 6, AB_MARKT + 11), FALSE)
     zweisprachig("Schneekristalle: sechs Arme, jeder anders -- was unten ankommt, bleibt liegen", _
@@ -3736,12 +4932,17 @@ SUB uebergang(sh AS INTEGER, aus AS FLOAT, ein AS FLOAT, r AS FLOAT, g AS FLOAT,
     SHADER_SET3(sh, "uebLicht", r, g, b)
 END SUB
 
-' Ein Zwischenspiel am Kranz (zwei Takte): die naechste Kerze entzuendet sich,
-' die Kamera faehrt in ihre Flamme, das Licht fuehrt ins naechste Kapitel.
-SUB kranzZeigen(sh AS INTEGER, takt AS FLOAT, von AS FLOAT, brennen AS FLOAT, k AS INTEGER, bis AS FLOAT)
-    SHADER_SET(sh, "kerzen", brennen + CLAMP((takt - (von + 0.3)) * 2.5, 0.0, 1.0))
-    SHADER_SET(sh, "fokus", CLAMP((takt - (bis - 1.3)) / 1.3, 0.0, 1.0))
+' Ein Zwischenspiel am Kranz (zwei Takte): wenn das Licht des Uebergangs
+' gewichen ist, entzuendet sich die naechste Kerze (auf den Glockenschlag in
+' musik.dh), dann faehrt die Kamera in ihre Flamme und das Licht fuehrt ins
+' naechste Kapitel. Frueher entzuendete sie sich noch hinter dem Licht --
+' man sah sie schon brennen.
+SUB kranzZeigen(sh AS INTEGER, takt AS FLOAT, von AS FLOAT, k AS INTEGER, bis AS FLOAT)
+    SHADER_SET(sh, "kerzen", kerzenBrennen(takt))
+    SHADER_SET(sh, "fokus", CLAMP((takt - (bis - 0.8)) / 0.8, 0.0, 1.0))
     SHADER_SET(sh, "ziel", k)
+    SHADER_SET(sh, "phase", CLAMP((takt - von) / (bis - von), 0.0, 1.0))
+    SHADER_SET(sh, "bogen", 0.55)
 END SUB
 
 ' Die Farbe jedes Akkords: die Nacht (g-Moll) in kalten Toenen -- tiefblau,
@@ -3846,21 +5047,23 @@ WHILE NOT beenden
         sh = shKranz
         IF takt < AB_DORF THEN
             SHADER_SET(sh, "hell", CLAMP(takt / 1.5, 0.0, 1.0))
-            SHADER_SET(sh, "kerzen", CLAMP((takt - 4.9) * 2.5, 0.0, 1.0))
+            SHADER_SET(sh, "kerzen", kerzenBrennen(takt))
             SHADER_SET(sh, "fokus", CLAMP((takt - 6.4) / 1.6, 0.0, 1.0))
             SHADER_SET(sh, "ziel", 0)
+            SHADER_SET(sh, "phase", CLAMP(takt / AB_DORF, 0.0, 1.0))
+            SHADER_SET(sh, "bogen", 1.4)
             uebergang(sh, vorEnde(takt, AB_DORF), 1.0, 1.0, 0.75, 0.45)
         ELSEIF takt < AB_MARKT THEN
             SHADER_SET(sh, "hell", 1.0)
-            kranzZeigen(sh, takt, AB_KRANZ2, 1.0, 1, AB_MARKT)
+            kranzZeigen(sh, takt, AB_KRANZ2, 1, AB_MARKT)
             uebergang(sh, vorEnde(takt, AB_MARKT), nachBeginn(takt, AB_KRANZ2), 1.0, 0.75, 0.45)
         ELSEIF takt < AB_WALD THEN
             SHADER_SET(sh, "hell", 1.0)
-            kranzZeigen(sh, takt, AB_KRANZ3, 2.0, 2, AB_WALD)
+            kranzZeigen(sh, takt, AB_KRANZ3, 2, AB_WALD)
             uebergang(sh, vorEnde(takt, AB_WALD), nachBeginn(takt, AB_KRANZ3), 1.0, 0.75, 0.45)
         ELSE
             SHADER_SET(sh, "hell", 1.0)
-            kranzZeigen(sh, takt, AB_KRANZ4, 3.0, 3, AB_SCHLITTEN)
+            kranzZeigen(sh, takt, AB_KRANZ4, 3, AB_SCHLITTEN)
             uebergang(sh, vorEnde(takt, AB_SCHLITTEN), nachBeginn(takt, AB_KRANZ4), 1.0, 0.75, 0.45)
         END IF
     ELSEIF takt < AB_KRANZ2 THEN
@@ -3901,12 +5104,16 @@ WHILE NOT beenden
         ' juengste schon aufgegangen ist
         DIM schritt AS FLOAT : schritt = musikSchritt()
         SHADER_SET(sh, "kugeln", kugelnBei(schritt))
+        ' der Baum entfaltet sich, sobald das Fenster aufgeht, dann laeuft
+        ' das Licht die Kette hinauf
+        SHADER_SET(sh, "aufbau", CLAMP((takt - (AB_STUBE + 2.4)) / 4.0, 0.0, 1.0))
+        SHADER_SET(sh, "kette", CLAMP((takt - (AB_STUBE + 5.5)) / 3.0, 0.0, 1.0))
         SHADER_SET(sh, "glocke", glockenSchlag(takt))
         SHADER_SET(sh, "stern", CLAMP((takt - AB_STERN) * 2.0, 0.0, 1.0))
         SHADER_SET(sh, "nacht", CLAMP((takt - (AB_MITTERNACHT - 2)) / 2.0, 0.0, 1.0))
         uebergang(sh, vorEnde(takt, AB_AUS + 2), nachBeginn(takt, AB_STUBE), 1.0, 0.82, 0.55)
         ' Schnee nur, solange wir noch draussen vor dem Fenster stehen
-        zielDicht = IIF(takt < AB_STUBE + 5, 0.4, 0.0) : zielDraussen = 0.0
+        zielDicht = IIF(takt < AB_STUBE + 3.5, 0.4, 0.0) : zielDraussen = 0.0
         schneeWind = 0.05
     ELSE
         ' Abspann: das Dorf, ueber ihm der Stern, aus dem der Gruss aufsteigt
